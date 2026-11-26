@@ -58,11 +58,11 @@ export interface MaterialOption {
 }
 
 export const MATERIALS: MaterialOption[] = [
-  { value: 'Wood', label: 'Wood' },
-  { value: 'Metal / Cast Iron', label: 'Metal / Cast Iron' },
-  { value: 'Stone / Concrete', label: 'Stone / Concrete' },
-  { value: 'Composite / Plastic', label: 'Composite / Plastic' },
-  { value: 'Mixed', label: 'Mixed' },
+  { value: 'wood', label: 'Wood' },
+  { value: 'metal', label: 'Metal / Cast Iron' },
+  { value: 'stone', label: 'Stone / Concrete' },
+  { value: 'composite', label: 'Composite / Plastic' },
+  { value: 'mixed', label: 'Mixed' },
 ];
 
 export function tierForDifficulty(d: Difficulty): Tier {
@@ -91,14 +91,19 @@ export function difficultyLabel(d: Difficulty): string {
 export function materialLabel(m: Material): string {
   switch (m) {
     case 'wood':
+    case 'Wood':
       return 'Wood';
     case 'metal':
+    case 'Metal / Cast Iron':
       return 'Metal / Cast Iron';
     case 'stone':
+    case 'Stone / Concrete':
       return 'Stone / Concrete';
     case 'composite':
+    case 'Composite / Plastic':
       return 'Composite / Plastic';
     case 'mixed':
+    case 'Mixed':
       return 'Mixed';
     default:
       return m;
