@@ -10,32 +10,18 @@ export interface TaxonomyItem {
 
 export const TAXONOMY: TaxonomyItem[] = [
   {
-    value: 'urban',
+    value: 'easy',
     label: 'Standard / Urban',
     shortLabel: 'Urban',
     desc: 'Town centres, high streets, bus stops & public parks. High footfall.',
     isPaid: false,
   },
   {
-    value: 'scenic',
+    value: 'moderate',
     label: 'Scenic / Viewpoint',
     shortLabel: 'Scenic',
     desc: 'Promenades, harbour walls & hilltops with clear open vistas.',
     isPaid: false,
-  },
-  {
-    value: 'transit',
-    label: 'Rest & Transit',
-    shortLabel: 'Transit',
-    desc: 'Canal towpaths, trailside rests & park walking loop seats.',
-    isPaid: false,
-  },
-  {
-    value: 'historic',
-    label: 'Memorial & Historic',
-    shortLabel: 'Historic',
-    desc: 'Heritage benches, antique carved seats & commemorative spots.',
-    isPaid: true,
   },
   {
     value: 'tricky',
@@ -45,7 +31,7 @@ export const TAXONOMY: TaxonomyItem[] = [
     isPaid: true,
   },
   {
-    value: 'obscure',
+    value: 'hidden',
     label: 'Obscure & Hidden',
     shortLabel: 'Obscure',
     desc: 'Tucked away in lost inclosures, behind ruins or secret clearings.',
@@ -60,12 +46,10 @@ export interface DifficultyOption {
 }
 
 export const DIFFICULTIES: DifficultyOption[] = [
-  { value: 'urban', label: 'Standard / Urban', hint: 'Town centres, parks & high-footfall spots.' },
-  { value: 'scenic', label: 'Scenic / Viewpoint', hint: 'Coastal walls, hilltops & open vistas.' },
-  { value: 'transit', label: 'Rest & Transit', hint: 'Towpaths & trailside resting points.' },
-  { value: 'historic', label: 'Memorial & Historic', hint: 'Heritage seats & carved memorial benches.' },
+  { value: 'easy', label: 'Standard / Urban', hint: 'Town centres, parks & high-footfall spots.' },
+  { value: 'moderate', label: 'Scenic / Viewpoint', hint: 'Coastal walls, hilltops & open vistas.' },
   { value: 'tricky', label: 'Tricky / Off-Trail', hint: 'Unpaved tracks & steep woodland paths.' },
-  { value: 'obscure', label: 'Obscure & Hidden', hint: 'Secret clearings & overgrown spots.' },
+  { value: 'hidden', label: 'Obscure & Hidden', hint: 'Secret clearings & overgrown spots.' },
 ];
 
 export interface MaterialOption {
@@ -86,24 +70,17 @@ export function tierForDifficulty(d: Difficulty): Tier {
 }
 
 export function isPaidTier(d: Difficulty): boolean {
-  return d === 'historic' || d === 'tricky' || d === 'obscure' || d === 'hidden';
+  return d === 'tricky' || d === 'hidden';
 }
 
 export function difficultyLabel(d: Difficulty): string {
   switch (d) {
-    case 'urban':
     case 'easy':
       return 'Standard / Urban';
-    case 'scenic':
-      return 'Scenic / Viewpoint';
-    case 'transit':
     case 'moderate':
-      return 'Rest & Transit';
-    case 'historic':
-      return 'Memorial & Historic';
+      return 'Scenic / Viewpoint';
     case 'tricky':
       return 'Tricky / Off-Trail';
-    case 'obscure':
     case 'hidden':
       return 'Obscure & Hidden';
     default:

@@ -130,12 +130,13 @@ export default function BrowseView({
             Sort
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as 'name' | 'newest')}
+              onChange={(e) => setSortBy(e.target.value as 'name' | 'newest' | 'nearest')}
               aria-label="Sort benches"
               style={{ borderRadius: 8, padding: '4px 8px', border: '1px solid var(--line)', background: '#fff', color: 'var(--ink)' }}
             >
               <option value="name">A–Z</option>
               <option value="newest">Newest</option>
+              <option value="nearest">Nearest</option>
             </select>
           </label>
         </div>
@@ -160,6 +161,3 @@ export default function BrowseView({
     </div>
   );
 }
-
-
-
