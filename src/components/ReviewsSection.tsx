@@ -284,7 +284,7 @@ export default function ReviewsSection({
   onReport(id: string, reason: ReportReason, details: string): string | null | void | Promise<string | null | void>;
 }) {
   const [composing, setComposing] = useState(false);
-  const [reviewSort, setReviewSort] = useState<'newest' | 'highest'>('newest');
+  const [reviewSort, setReviewSort] = useState<'newest' | 'highest' | 'lowest'>('newest');
 
   const visible = reviews.filter(
     (r) => r.status !== 'hidden' || (user && r.author.id === user.id),
@@ -292,6 +292,16 @@ export default function ReviewsSection({
   const sortedReviews = useMemo(() => {
     if (reviewSort === 'highest') {
       return [...visible].sort((a, b) => (resolveDisplayRating(b) ?? 0) - (resolveDisplayRating(a) ?? 0));
+    }
+    if (reviewSort === 'lowest') {
+      return [...visible].sort((a, b) => {
+        const ra = resolveDisplayRating(a);
+        const rb = resolveDisplayRating(b);
+        if (ra === undefined && rb === undefined) return b.createdAt.localeCompare(a.createdAt);
+        if (ra === undefined) return 1;
+        if (rb === undefined) return -1;
+        return ra - rb;
+      });
     }
     return [...visible].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [visible, reviewSort]);
@@ -322,12 +332,13 @@ export default function ReviewsSection({
         <div className="row-gap" style={{ alignItems: 'center' }}>
           <select
             value={reviewSort}
-            onChange={(e) => setReviewSort(e.target.value as 'newest' | 'highest')}
+            onChange={(e) => setReviewSort(e.target.value as 'newest' | 'highest' | 'lowest')}
             aria-label="Sort reviews"
             style={{ borderRadius: 8, padding: '3px 8px', border: '1px solid var(--line)', background: '#fff', color: 'var(--ink)', fontSize: '0.8rem' }}
           >
             <option value="newest">Newest</option>
             <option value="highest">Highest rated</option>
+            <option value="lowest">Lowest rated</option>
           </select>
         </div>
         {avg !== null && (
@@ -364,5 +375,3 @@ export default function ReviewsSection({
     </section>
   );
 }
-
-
