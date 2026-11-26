@@ -11,9 +11,9 @@ export interface ContributionPayload {
 }
 
 /**
- * Structured gallery contribution. Guardrails (UX side — mirrored server-side in production):
- * signed-in only (enforced by App), required context tag, short link-free caption,
- * file type/size/min-dimension checks, per-user-per-bench cap, and an on-site attestation.
+- Structured gallery contribution. Guardrails (UX side — mirrored server-side in production):
+- signed-in only (enforced by App), required context tag, short link-free caption,
+- file type/size/min-dimension checks, and per-user-per-bench cap.
  */
 export default function ContributePhotoModal({
   bench,
@@ -29,7 +29,6 @@ export default function ContributePhotoModal({
   const [photo, setPhoto] = useState<ProcessedPhoto | null>(null);
   const [tag, setTag] = useState<PhotoTag | null>(null);
   const [caption, setCaption] = useState('');
-  const [attest, setAttest] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
@@ -51,7 +50,6 @@ export default function ContributePhotoModal({
   const submit = () => {
     if (!photo) return setError('Choose or take a photo first.');
     if (!tag) return setError('Tell us what the photo shows.');
-    if (!attest) return setError('Please confirm the photo was taken at or near this bench.');
     setError(onSubmit({ photo, tag, caption: caption.trim() }));
   };
 
@@ -111,11 +109,6 @@ export default function ContributePhotoModal({
             onChange={(e) => setCaption(e.target.value)}
             placeholder="e.g. Looking west over the Forth at sunset"
           />
-        </label>
-
-        <label className="check">
-          <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />
-          <span>I took this photo at or near this bench, and it doesn't show identifiable people's faces or number plates.</span>
         </label>
 
         {error && <div className="error">{error}</div>}

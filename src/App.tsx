@@ -31,6 +31,7 @@ import type {
   LngLat,
   MapLayerMode,
   PublicAuthor,
+  Rating,
   ReportReason,
   Review,
   User,
@@ -62,6 +63,23 @@ function toPublicAuthor(u: User): PublicAuthor {
   };
 }
 
+function getBenchIdFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  return params.get('bench');
+}
+
+function setBenchIdInUrl(id: string | null): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (id) {
+    url.searchParams.set('bench', id);
+  } else {
+    url.searchParams.delete('bench');
+  }
+  window.history.replaceState({}, '', url.toString());
+}
+
 export default function App() {
   const isDesktop = useMediaQuery('(min-width: 768px)');
   const isMobile = !isDesktop;
@@ -91,6 +109,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const toastTimer = useRef<number | undefined>(undefined);
+  const appliedUrlBenchRef = useRef<string | null>(null);
+  const hasInitializedUrlSync = useRef(false);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -109,6 +129,14 @@ export default function App() {
   }, [showToast]);
 
   const selectedId = view.kind === 'detail' ? view.id : null;
+
+  useEffect(() => {
+    if (!hasInitializedUrlSync.current) {
+      hasInitializedUrlSync.current = true;
+      return;
+    }
+    setBenchIdInUrl(selectedId);
+  }, [selectedId]);
 
   const refreshDetailContent = useCallback(async (benchId: string | null, viewerId?: string) => {
     if (!benchId) {
@@ -151,7 +179,9 @@ export default function App() {
   }, [user?.id]);
   useEffect(() => writeJSON('layer', layerMode), [layerMode]);
 
-  const fly = (p: LngLat, zoom?: number) => setFlyTarget({ ...p, zoom, key: Date.now() });
+  const fly = useCallback((p: LngLat, zoom?: number) => {
+    setFlyTarget({ ...p, zoom, key: Date.now() });
+  }, []);
   const units = user?.prefs.units ?? 'metric';
 
   // ---- derived ----
@@ -159,6 +189,20 @@ export default function App() {
     () => benches.map((b) => toViewBench(b, { subscribed, user })),
     [benches, subscribed, user],
   );
+
+  // Open ?bench=<id> once benches are loaded
+  useEffect(() => {
+    const targetId = getBenchIdFromUrl();
+    if (!targetId || appliedUrlBenchRef.current === targetId) return;
+    const match = viewBenches.find((v) => v.bench.id === targetId);
+    if (match) {
+      appliedUrlBenchRef.current = targetId;
+      setView({ kind: 'detail', id: match.bench.id, from: 'browse' });
+      if (isMobile) setSheet('half');
+      fly({ lng: match.displayLng, lat: match.displayLat }, match.locked ? 11 : 15);
+    }
+  }, [viewBenches, isMobile, fly]);
+
   const editingId = view.kind === 'edit' ? view.id : null;
   const mapBenches = useMemo(
     () =>
@@ -520,19 +564,19 @@ export default function App() {
             user={user}
             onRequireAuth={() => requireAuth('Sign in to leave a review — your display name is shown, never your email.')}
             onComposerOpen={() => isMobile && setSheet('full')}
-            onCreate={(body) =>
+            onCreate={(body, rating?: Rating) =>
               runReviewMutation(
                 async () => {
-                  await benchService.addReview({ benchId: bench.id, authorId: user!.id, body });
+                  await benchService.addReview({ benchId: bench.id, authorId: user!.id, body, rating });
                 },
                 bench.id,
                 'Review posted.',
               )
             }
-            onUpdate={(id, body) =>
+            onUpdate={(id, body, rating?: Rating) =>
               runReviewMutation(
                 async () => {
-                  await benchService.updateReview(id, user!.id, body);
+                  await benchService.updateReview(id, user!.id, body, rating);
                 },
                 bench.id,
                 'Review updated.',
@@ -798,5 +842,3 @@ export default function App() {
     </div>
   );
 }
-
-
