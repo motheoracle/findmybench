@@ -157,6 +157,7 @@ function ReviewItem({
     setBusy(true);
     await onReport(review.id, reason, details);
     setBusy(false);
+    setDetails('');
     setReported(true);
     setReporting(false);
   };
@@ -189,7 +190,10 @@ function ReviewItem({
             {review.updatedAt ? ' - edited' : ''}
           </span>
         </div>
-        {(() => { const displayRating = resolveDisplayRating(review); return displayRating ? <Stars value={displayRating} /> : null; })()}
+        {(() => {
+          const displayRating = resolveDisplayRating(review);
+          return displayRating ? <Stars value={displayRating} /> : null;
+        })()}
       </div>
 
       {review.status !== 'visible' && (
@@ -230,10 +234,25 @@ function ReviewItem({
       </div>
 
       {reporting && (
-        <form className="report-box" onSubmit={handleReport}>
-          <label className="field">
+        <form
+          className="report-box"
+          onSubmit={handleReport}
+          style={{
+            display: 'grid',
+            gap: 8,
+            alignItems: 'stretch',
+            marginTop: 10,
+            paddingTop: 10,
+            borderTop: '1px solid rgba(0, 0, 0, 0.08)',
+          }}
+        >
+          <label className="field" style={{ width: '100%' }}>
             <span>Reason</span>
-            <select value={reason} onChange={(e) => setReason(e.target.value as ReportReason)}>
+            <select
+              value={reason}
+              onChange={(e) => setReason(e.target.value as ReportReason)}
+              style={{ width: '100%' }}
+            >
               {REPORT_REASONS.map((r) => (
                 <option key={r.value} value={r.value}>
                   {r.label}
@@ -241,21 +260,22 @@ function ReviewItem({
               ))}
             </select>
           </label>
-          <label className="field">
+          <label className="field" style={{ width: '100%' }}>
             <span>Details (optional)</span>
             <input
               type="text"
               value={details}
               onChange={(e) => setDetails(e.target.value)}
               placeholder="Anything helpful for moderators"
+              style={{ width: '100%' }}
             />
           </label>
-          <div className="row-gap">
-            <button type="submit" className="btn btn-secondary btn-sm" disabled={busy}>
-              Submit report
-            </button>
+          <div className="row-gap" style={{ justifyContent: 'flex-end' }}>
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setReporting(false)}>
               Cancel
+            </button>
+            <button type="submit" className="btn btn-secondary btn-sm" disabled={busy}>
+              Submit report
             </button>
           </div>
         </form>

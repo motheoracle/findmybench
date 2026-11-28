@@ -133,6 +133,7 @@ export default function App() {
   const [selectedReviews, setSelectedReviews] = useState<Review[]>([]);
   const [selectedPhotos, setSelectedPhotos] = useState<GalleryPhoto[]>([]);
   const [flaggedPhotos, setFlaggedPhotos] = useState<GalleryPhoto[]>([]);
+  const [flaggedReviews, setFlaggedReviews] = useState<Review[]>([]);
   const [dataRev, setDataRev] = useState(0);
   const [layerMode, setLayerMode] = useState<MapLayerMode>(
     () => readJSON<MapLayerMode>('layer', 'default'),
@@ -206,17 +207,29 @@ export default function App() {
   const refreshFlaggedQueue = useCallback(async () => {
     if (!DEV_TOOLS_ENABLED) {
       setFlaggedPhotos([]);
+      setFlaggedReviews([]);
       return;
     }
     try {
-      const remoteFlagged = await benchService.listFlaggedPhotos();
-      const localFlagged = galleryRepo.listForModeration();
-      const merged = new Map<string, GalleryPhoto>();
-      for (const p of localFlagged) merged.set(p.id, p);
-      for (const p of remoteFlagged) merged.set(p.id, p);
-      setFlaggedPhotos([...merged.values()]);
+      const [remotePhotos, remoteReviews] = await Promise.all([
+        benchService.listFlaggedPhotos(),
+        benchService.listFlaggedReviews(),
+      ]);
+
+      const localPhotos = galleryRepo.listForModeration();
+      const mergedPhotos = new Map<string, GalleryPhoto>();
+      for (const p of localPhotos) mergedPhotos.set(p.id, p);
+      for (const p of remotePhotos) mergedPhotos.set(p.id, p);
+      setFlaggedPhotos([...mergedPhotos.values()]);
+
+      const localReviews = reviewRepo.listForModeration();
+      const mergedReviews = new Map<string, Review>();
+      for (const r of localReviews) mergedReviews.set(r.id, r);
+      for (const r of remoteReviews) mergedReviews.set(r.id, r);
+      setFlaggedReviews([...mergedReviews.values()]);
     } catch {
       setFlaggedPhotos(galleryRepo.listForModeration());
+      setFlaggedReviews(reviewRepo.listForModeration());
     }
   }, []);
 
@@ -238,7 +251,7 @@ export default function App() {
     }
     try {
       const [reviews, photos] = await Promise.all([
-        benchService.listReviews(benchId),
+        benchService.listReviews(benchId, viewerId),
         benchService.listPhotos(benchId, viewerId),
       ]);
       setSelectedReviews(reviews);
@@ -461,10 +474,9 @@ export default function App() {
   const modQueue = useMemo(
     () =>
       DEV_TOOLS_ENABLED
-        ? { photos: flaggedPhotos, reviews: reviewRepo.listForModeration() }
+        ? { photos: flaggedPhotos, reviews: flaggedReviews }
         : { photos: [], reviews: [] },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [flaggedPhotos, dataRev],
+    [flaggedPhotos, flaggedReviews],
   );
 
   // ---- navigation ----
@@ -889,8 +901,20 @@ export default function App() {
                 'Review deleted.',
               )
             }
-            onReport={(_id, _reason: ReportReason) => {
-              showToast('Thanks — review reported.');
+            onReport={(id, reason: ReportReason) => {
+              if (!user) {
+                requireAuth('Sign in to report a review.');
+                return null;
+              }
+              void benchService
+                .reportReview(id, reason)
+                .then(async () => {
+                  await refreshDetailContent(bench.id, user.id);
+                  await refreshFlaggedQueue();
+                  setDataRev((r) => r + 1);
+                  showToast('Thanks — review reported and sent for moderation.');
+                })
+                .catch((err) => showToast(errMsg(err)));
               return null;
             }}
           />
@@ -1257,7 +1281,21 @@ export default function App() {
             }}
             onReview={(id, s) => {
               reviewRepo.moderate(id, s);
-              setDataRev((r) => r + 1);
+              void benchService
+                .moderateReview(id, s)
+                .then(async () => {
+                  if (selectedId) await refreshDetailContent(selectedId, user?.id);
+                  await refreshFlaggedQueue();
+                  setDataRev((r) => r + 1);
+                  showToast(
+                    s === 'delete'
+                      ? 'Review deleted.'
+                      : s === 'visible'
+                        ? 'Review approved and visible.'
+                        : 'Review hidden.',
+                  );
+                })
+                .catch((err) => showToast(errMsg(err)));
             }}
           />
         </Suspense>

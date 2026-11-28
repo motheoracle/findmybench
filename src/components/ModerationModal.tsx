@@ -71,7 +71,7 @@ export default function ModerationModal({
     selected: ModerationAction | undefined,
     onSelect: (action: ModerationAction) => void,
   ) => (
-    <div className="row-gap">
+    <div className="row-gap" style={{ flexWrap: 'wrap' }}>
       <button
         type="button"
         className={`btn btn-sm ${selected === 'visible' ? 'btn-primary' : 'btn-outline'}`}
@@ -113,9 +113,11 @@ export default function ModerationModal({
         {photos.map((p) => (
           <li key={p.id}>
             <img src={p.src} alt="" />
-            <div>
-              <strong>{photoTagLabel(p.tag)}</strong> on {benchName(p.benchId)} ·{' '}
-              <span className={`badge status-${p.status}`}>{p.status}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div>
+                <strong>{photoTagLabel(p.tag)}</strong> on {benchName(p.benchId)} ·{' '}
+                <span className={`badge status-${p.status}`}>{p.status}</span>
+              </div>
               <div className="small muted">
                 {p.reports.length} report(s):{' '}
                 {p.reports.map((r) => reasonLabel(r.reason)).join(', ') || '—'}
@@ -125,14 +127,27 @@ export default function ModerationModal({
           </li>
         ))}
         {reviews.map((r) => (
-          <li key={r.id}>
-            <div className="mod-review">
-              “{r.body.slice(0, 160)}
-              {r.body.length > 160 ? '…' : ''}”
+          <li
+            key={r.id}
+            style={{
+              padding: 12,
+              borderRadius: 10,
+              border: '1px solid rgba(0,0,0,0.08)',
+              background: 'rgba(0,0,0,0.02)',
+            }}
+          >
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, wordBreak: 'break-word' }}>
+                “{r.body.slice(0, 160)}
+                {r.body.length > 160 ? '…' : ''}”
+              </div>
               <div className="small muted">
-                on {benchName(r.benchId)} ·{' '}
-                <span className={`badge status-${r.status}`}>{r.status}</span> ·{' '}
-                {r.reports.length} report(s)
+                Review on <strong>{benchName(r.benchId)}</strong> ·{' '}
+                <span className={`badge status-${r.status}`}>{r.status}</span>
+              </div>
+              <div className="small muted">
+                {r.reports.length} report(s):{' '}
+                {r.reports.map((rep) => reasonLabel(rep.reason)).join(', ') || '—'}
               </div>
               {renderActions(reviewChoices[r.id], (s) => toggleReviewChoice(r.id, s))}
             </div>

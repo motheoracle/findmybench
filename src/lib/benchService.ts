@@ -20,6 +20,7 @@ import type {
   Units,
   User,
   UserPreferences,
+  UserReport,
 } from '../types';
 
 const STORAGE_BUCKET = 'bench-photos';
@@ -59,6 +60,9 @@ interface ReviewRow {
   author_id: string;
   body: string;
   rating?: number | null;
+  is_hidden?: boolean | null;
+  report_count?: number | null;
+  report_reasons?: string[] | null;
   created_at: string;
 }
 
@@ -104,10 +108,28 @@ function fromDbPhotoTag(tag: PhotoRow['context_tag']): PhotoTag {
   }
 }
 
-function resolvePhotoStatus(row: Pick<PhotoRow, 'is_hidden' | 'report_count'>): ModerationStatus {
-  if (row.report_count > 0) return 'flagged';
+function resolveModerationStatus(row: {
+  is_hidden?: boolean | null;
+  report_count?: number | null;
+}): ModerationStatus {
+  if ((row.report_count ?? 0) > 0) return 'flagged';
   if (row.is_hidden) return 'hidden';
   return 'visible';
+}
+
+function mapReviewReports(row: Pick<ReviewRow, 'report_reasons' | 'report_count'>): UserReport[] {
+  const reasons = Array.isArray(row.report_reasons) ? row.report_reasons : [];
+  if (reasons.length > 0) {
+    return reasons.map((reason, idx) => ({
+      userId: `reporter-${idx + 1}`,
+      reason: reason as ReportReason,
+    }));
+  }
+  const count = Math.max(0, Number(row.report_count ?? 0));
+  return Array.from({ length: count }, (_, idx) => ({
+    userId: `reporter-${idx + 1}`,
+    reason: 'other' as ReportReason,
+  }));
 }
 
 function dataUrlToBlob(dataUrl: string): { blob: Blob; ext: string } {
@@ -212,6 +234,27 @@ class SupabaseBenchService {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       source: 'user',
+    };
+  }
+
+  private mapReviewRow(r: ReviewRow, profiles: Record<string, ProfileRow>): Review {
+    return {
+      id: r.id,
+      benchId: r.bench_id,
+      author: {
+        id: r.author_id,
+        name: profiles[r.author_id]?.display_name ?? 'Bench Explorer',
+        age: profiles[r.author_id]?.age ?? undefined,
+        avatar: profiles[r.author_id]?.avatar_url ?? undefined,
+      } satisfies PublicAuthor,
+      body: r.body,
+      rating:
+        typeof r.rating === 'number' && r.rating >= 1 && r.rating <= 5
+          ? (r.rating as 1 | 2 | 3 | 4 | 5)
+          : undefined,
+      createdAt: r.created_at,
+      status: resolveModerationStatus(r),
+      reports: mapReviewReports(r),
     };
   }
 
@@ -589,7 +632,7 @@ class SupabaseBenchService {
     return mapped;
   }
 
-  async listReviews(benchId: string): Promise<Review[]> {
+  async listReviews(benchId: string, viewerId?: string): Promise<Review[]> {
     if (!isUuid(benchId)) return [];
     const { data, error } = await supabase
       .from('bench_reviews')
@@ -601,23 +644,27 @@ class SupabaseBenchService {
       throw new Error(error.message || 'Failed to load reviews.');
     }
 
+    const rows = ((data ?? []) as ReviewRow[]).filter(
+      (r) => (!r.is_hidden && (r.report_count ?? 0) === 0) || r.author_id === viewerId,
+    );
+    const profiles = await this.ensureProfiles(rows.map((r) => r.author_id));
+    return rows.map((r) => this.mapReviewRow(r, profiles));
+  }
+
+  async listFlaggedReviews(): Promise<Review[]> {
+    const { data, error } = await supabase
+      .from('bench_reviews')
+      .select('*')
+      .or('is_hidden.eq.true,report_count.gt.0')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new Error(error.message || 'Failed to load review moderation queue.');
+    }
+
     const rows = (data ?? []) as ReviewRow[];
     const profiles = await this.ensureProfiles(rows.map((r) => r.author_id));
-    return rows.map((r) => ({
-      id: r.id,
-      benchId: r.bench_id,
-      author: {
-        id: r.author_id,
-        name: profiles[r.author_id]?.display_name ?? 'Bench Explorer',
-        age: profiles[r.author_id]?.age ?? undefined,
-        avatar: profiles[r.author_id]?.avatar_url ?? undefined,
-      } satisfies PublicAuthor,
-      body: r.body,
-      rating: typeof r.rating === 'number' && r.rating >= 1 && r.rating <= 5 ? (r.rating as 1 | 2 | 3 | 4 | 5) : undefined,
-      createdAt: r.created_at,
-      status: 'visible' satisfies ModerationStatus,
-      reports: [],
-    }));
+    return rows.map((r) => this.mapReviewRow(r, profiles));
   }
 
   async addReview(input: { benchId: string; authorId: string; body: string; rating?: 1 | 2 | 3 | 4 | 5 }): Promise<Review> {
@@ -646,17 +693,11 @@ class SupabaseBenchService {
     const profiles = await this.ensureProfiles([input.authorId]);
     const row = data as ReviewRow;
     return {
-      id: row.id,
-      benchId: row.bench_id,
-      author: {
-        id: row.author_id,
-        name: profiles[row.author_id]?.display_name ?? 'Bench Explorer',
-      },
-      body: row.body,
-      rating: typeof row.rating === 'number' && row.rating >= 1 && row.rating <= 5 ? (row.rating as 1 | 2 | 3 | 4 | 5) : input.rating,
-      createdAt: row.created_at,
-      status: 'visible',
-      reports: [],
+      ...this.mapReviewRow(row, profiles),
+      rating:
+        typeof row.rating === 'number' && row.rating >= 1 && row.rating <= 5
+          ? (row.rating as 1 | 2 | 3 | 4 | 5)
+          : input.rating,
     };
   }
 
@@ -685,6 +726,59 @@ class SupabaseBenchService {
 
     if (error) {
       throw new Error(error.message || 'Could not delete review.');
+    }
+  }
+
+  async reportReview(reviewId: string, reason: ReportReason): Promise<void> {
+    if (!isUuid(reviewId)) return;
+    const { error } = await supabase.rpc('report_bench_review', {
+      p_review_id: reviewId,
+      p_reason: reason,
+    });
+    if (error) {
+      throw new Error(error.message || 'Could not report review.');
+    }
+  }
+
+  async moderateReview(reviewId: string, decision: ModerationStatus | 'delete'): Promise<void> {
+    if (!isUuid(reviewId)) return;
+
+    if (decision === 'delete') {
+      const { data, error } = await supabase
+        .from('bench_reviews')
+        .delete()
+        .eq('id', reviewId)
+        .select('id');
+      if (error) {
+        throw new Error(error.message || 'Could not delete review.');
+      }
+      if (!data || data.length === 0) {
+        throw new Error(
+          'Delete blocked by Supabase RLS policy — grant moderator DELETE permission on bench_reviews.',
+        );
+      }
+      return;
+    }
+
+    const patch =
+      decision === 'visible'
+        ? { is_hidden: false, report_count: 0, report_reasons: [] }
+        : decision === 'flagged'
+          ? { is_hidden: true, report_count: 1 }
+          : { is_hidden: true, report_count: 0 };
+
+    const { data, error } = await supabase
+      .from('bench_reviews')
+      .update(patch)
+      .eq('id', reviewId)
+      .select('id');
+    if (error) {
+      throw new Error(error.message || 'Could not update review moderation status.');
+    }
+    if (!data || data.length === 0) {
+      throw new Error(
+        'Update blocked by Supabase RLS policy — grant moderator UPDATE permission on bench_reviews.',
+      );
     }
   }
 
@@ -722,7 +816,7 @@ class SupabaseBenchService {
       bytes: 0,
       contentHash: '',
       createdAt: r.created_at,
-      status: resolvePhotoStatus(r),
+      status: resolveModerationStatus(r),
       reports: [],
     }));
   }
@@ -758,7 +852,7 @@ class SupabaseBenchService {
       bytes: 0,
       contentHash: '',
       createdAt: r.created_at,
-      status: resolvePhotoStatus(r),
+      status: resolveModerationStatus(r),
       reports: [],
     }));
   }
@@ -859,7 +953,7 @@ class SupabaseBenchService {
 
     const profiles = await this.ensureProfiles([input.uploaderId]);
     const row = data as PhotoRow;
-    const resolvedStatus = resolvePhotoStatus(row);
+    const resolvedStatus = resolveModerationStatus(row);
 
     return {
       id: row.id,
