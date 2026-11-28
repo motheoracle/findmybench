@@ -1,5 +1,7 @@
 ﻿node_modules/
 dist/
+resources/
+icons/
 .env.local
 .env.*.local
 *.log
