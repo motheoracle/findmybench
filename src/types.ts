@@ -120,6 +120,7 @@ export type ReportReason = 'spam' | 'offensive' | 'inaccurate' | 'off-topic' | '
 export interface UserReport {
   userId: string;
   reason: ReportReason;
+  details?: string;
   createdAt?: string;
   at?: string;
 }

@@ -149,6 +149,26 @@ export default function ModerationModal({
                 {r.reports.length} report(s):{' '}
                 {r.reports.map((rep) => reasonLabel(rep.reason)).join(', ') || '—'}
               </div>
+              {r.reports.some((rep) => rep.details) && (
+                <div
+                  className="small"
+                  style={{
+                    marginTop: 4,
+                    padding: '6px 8px',
+                    borderRadius: 6,
+                    background: 'rgba(0,0,0,0.04)',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {r.reports
+                    .filter((rep) => rep.details)
+                    .map((rep, idx) => (
+                      <div key={idx}>
+                        <strong>Note:</strong> {rep.details}
+                      </div>
+                    ))}
+                </div>
+              )}
               {renderActions(reviewChoices[r.id], (s) => toggleReviewChoice(r.id, s))}
             </div>
           </li>

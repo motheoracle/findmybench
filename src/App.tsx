@@ -901,13 +901,13 @@ export default function App() {
                 'Review deleted.',
               )
             }
-            onReport={(id, reason: ReportReason) => {
+            onReport={(id, reason: ReportReason, details: string) => {
               if (!user) {
                 requireAuth('Sign in to report a review.');
                 return null;
               }
               void benchService
-                .reportReview(id, reason)
+                .reportReview(id, reason, details)
                 .then(async () => {
                   await refreshDetailContent(bench.id, user.id);
                   await refreshFlaggedQueue();

@@ -63,6 +63,7 @@ interface ReviewRow {
   is_hidden?: boolean | null;
   report_count?: number | null;
   report_reasons?: string[] | null;
+  report_notes?: string[] | null;
   created_at: string;
 }
 
@@ -117,19 +118,30 @@ function resolveModerationStatus(row: {
   return 'visible';
 }
 
-function mapReviewReports(row: Pick<ReviewRow, 'report_reasons' | 'report_count'>): UserReport[] {
+function mapReviewReports(
+  row: Pick<ReviewRow, 'report_reasons' | 'report_notes' | 'report_count'>,
+): UserReport[] {
   const reasons = Array.isArray(row.report_reasons) ? row.report_reasons : [];
+  const notes = Array.isArray(row.report_notes) ? row.report_notes : [];
   if (reasons.length > 0) {
-    return reasons.map((reason, idx) => ({
-      userId: `reporter-${idx + 1}`,
-      reason: reason as ReportReason,
-    }));
+    return reasons.map((reason, idx) => {
+      const note = typeof notes[idx] === 'string' ? notes[idx].trim() : '';
+      return {
+        userId: `reporter-${idx + 1}`,
+        reason: reason as ReportReason,
+        ...(note ? { details: note } : {}),
+      };
+    });
   }
   const count = Math.max(0, Number(row.report_count ?? 0));
-  return Array.from({ length: count }, (_, idx) => ({
-    userId: `reporter-${idx + 1}`,
-    reason: 'other' as ReportReason,
-  }));
+  return Array.from({ length: count }, (_, idx) => {
+    const note = typeof notes[idx] === 'string' ? notes[idx].trim() : '';
+    return {
+      userId: `reporter-${idx + 1}`,
+      reason: 'other' as ReportReason,
+      ...(note ? { details: note } : {}),
+    };
+  });
 }
 
 function dataUrlToBlob(dataUrl: string): { blob: Blob; ext: string } {
@@ -729,11 +741,12 @@ class SupabaseBenchService {
     }
   }
 
-  async reportReview(reviewId: string, reason: ReportReason): Promise<void> {
+  async reportReview(reviewId: string, reason: ReportReason, details = ''): Promise<void> {
     if (!isUuid(reviewId)) return;
     const { error } = await supabase.rpc('report_bench_review', {
       p_review_id: reviewId,
       p_reason: reason,
+      p_details: details.trim(),
     });
     if (error) {
       throw new Error(error.message || 'Could not report review.');
@@ -762,7 +775,7 @@ class SupabaseBenchService {
 
     const patch =
       decision === 'visible'
-        ? { is_hidden: false, report_count: 0, report_reasons: [] }
+        ? { is_hidden: false, report_count: 0, report_reasons: [], report_notes: [] }
         : decision === 'flagged'
           ? { is_hidden: true, report_count: 1 }
           : { is_hidden: true, report_count: 0 };
