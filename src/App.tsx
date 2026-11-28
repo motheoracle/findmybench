@@ -21,6 +21,7 @@ import { entitlements, DEV_TOOLS_ENABLED } from './services/entitlements';
 import { reviewRepo } from './services/reviewRepository';
 import { galleryRepo } from './services/galleryRepository';
 import { SAMPLE_BENCHES } from './data/sampleBenches';
+import { pickSessionSplashMessages } from './data/splashMessages';
 import { ACTIVE_COUNTRY, ACTIVE_REGION, isInsideRegion } from './config/regions';
 import { MAX_GALLERY_PHOTOS_PER_USER_PER_BENCH } from './config/community';
 import { isPaidTier, tierForDifficulty } from './config/taxonomy';
@@ -45,6 +46,12 @@ import type {
 const EXPLORER_PAYMENT_LINK = 'https://buy.stripe.com/cNi5kFgHq11De5N3F51wY00';
 const REROUTE_DISTANCE_THRESHOLD_M = 8;
 const ARRIVAL_DISTANCE_THRESHOLD_M = 15;
+const HEADING_DEADBAND_DEG = 2.5;
+const HEADING_SMOOTH_ALPHA = 0.16;
+
+// Total = 8000ms: two 1.0s beats, one 1.5s beat, two 0.7s beats, 1.1s beat, final 2.0s beat
+const SPLASH_DURATIONS_MS = [1000, 1000, 1500, 700, 700, 1100, 2000] as const;
+const SPLASH_TOTAL_MS = SPLASH_DURATIONS_MS.reduce((sum, ms) => sum + ms, 0);
 
 type PanelView =
   | { kind: 'browse' }
@@ -113,9 +120,50 @@ function normalizeHeading(deg: number): number {
   return ((deg % 360) + 360) % 360;
 }
 
+function shortestAngleDeltaDeg(fromDeg: number, toDeg: number): number {
+  return ((normalizeHeading(toDeg) - normalizeHeading(fromDeg) + 540) % 360) - 180;
+}
+
 export default function App() {
   const isDesktop = useMediaQuery('(min-width: 768px)');
   const isMobile = !isDesktop;
+
+  // ---- startup loading screen state (8s total with custom beat pacing) ----
+  const [splashMessages] = useState<string[]>(() => pickSessionSplashMessages(SPLASH_DURATIONS_MS.length));
+  const [splashVisible, setSplashVisible] = useState(true);
+  const [splashElapsedMs, setSplashElapsedMs] = useState(0);
+
+  useEffect(() => {
+    const startedAt = performance.now();
+    let rafId = 0;
+
+    const tick = (now: number) => {
+      const elapsed = now - startedAt;
+      if (elapsed >= SPLASH_TOTAL_MS) {
+        setSplashElapsedMs(SPLASH_TOTAL_MS);
+        setSplashVisible(false);
+        return;
+      }
+      setSplashElapsedMs(elapsed);
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
+
+  const splashProgress = Math.min(100, (splashElapsedMs / SPLASH_TOTAL_MS) * 100);
+
+  const splashMessage = useMemo(() => {
+    let cursor = 0;
+    for (let i = 0; i < SPLASH_DURATIONS_MS.length; i++) {
+      cursor += SPLASH_DURATIONS_MS[i];
+      if (splashElapsedMs < cursor) {
+        return splashMessages[i] ?? splashMessages[0];
+      }
+    }
+    return splashMessages[splashMessages.length - 1] ?? '';
+  }, [splashElapsedMs, splashMessages]);
 
   // ---- app state ----
   const [user, setUser] = useState<User | null>(null);
@@ -163,6 +211,7 @@ export default function App() {
   const routeAbortRef = useRef<AbortController | null>(null);
   const lastRoutedOriginRef = useRef<LngLat | null>(null);
   const hasCompassHeadingRef = useRef(false);
+  const smoothedHeadingRef = useRef<number | null>(null);
   const appliedUrlBenchRef = useRef<string | null>(null);
   const hasInitializedUrlSync = useRef(false);
 
@@ -192,6 +241,21 @@ export default function App() {
         // Permission denied or dismissed; movement heading fallback still works
       }
     }
+  }, []);
+
+  const updateSmoothedHeading = useCallback((rawDeg: number) => {
+    const target = normalizeHeading(rawDeg);
+    const current = smoothedHeadingRef.current;
+    if (current === null) {
+      smoothedHeadingRef.current = target;
+      setUserHeadingDeg(target);
+      return;
+    }
+    const delta = shortestAngleDeltaDeg(current, target);
+    if (Math.abs(delta) < HEADING_DEADBAND_DEG) return;
+    const next = normalizeHeading(current + delta * HEADING_SMOOTH_ALPHA);
+    smoothedHeadingRef.current = next;
+    setUserHeadingDeg(next);
   }, []);
 
   const refreshBenches = useCallback(async () => {
@@ -301,7 +365,7 @@ export default function App() {
   }, []);
   const units = user?.prefs.units ?? 'metric';
 
-  // ---- real-time facing heading (compass + movement fallback) ----
+  // ---- real-time facing heading (smoothed compass + movement fallback) ----
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -309,7 +373,7 @@ export default function App() {
       const iosHeading = (ev as unknown as { webkitCompassHeading?: number }).webkitCompassHeading;
       if (typeof iosHeading === 'number' && !Number.isNaN(iosHeading)) {
         hasCompassHeadingRef.current = true;
-        setUserHeadingDeg(normalizeHeading(iosHeading));
+        updateSmoothedHeading(iosHeading);
         return;
       }
 
@@ -318,7 +382,7 @@ export default function App() {
           typeof window.screen?.orientation?.angle === 'number' ? window.screen.orientation.angle : 0;
         const compassHeading = normalizeHeading(360 - ev.alpha + screenAngle);
         hasCompassHeadingRef.current = true;
-        setUserHeadingDeg(compassHeading);
+        updateSmoothedHeading(compassHeading);
       }
     };
 
@@ -334,7 +398,7 @@ export default function App() {
       window.removeEventListener('deviceorientation', handleOrientation);
       winWithAbs.removeEventListener('deviceorientationabsolute', handleOrientation);
     };
-  }, []);
+  }, [updateSmoothedHeading]);
 
   // ---- live route tracking (watchPosition) ----
   useEffect(() => {
@@ -383,7 +447,7 @@ export default function App() {
           !Number.isNaN(pos.coords.heading) &&
           (typeof pos.coords.speed !== 'number' || pos.coords.speed > 0.4)
         ) {
-          setUserHeadingDeg(normalizeHeading(pos.coords.heading));
+          updateSmoothedHeading(pos.coords.heading);
         }
 
         const distanceToBench = haversineMeters(current, {
@@ -413,7 +477,7 @@ export default function App() {
     return () => {
       navigator.geolocation.clearWatch(watchId);
     };
-  }, [routeTarget, units, clearRoute, showToast]);
+  }, [routeTarget, units, clearRoute, showToast, updateSmoothedHeading]);
 
   // ---- derived ----
   const viewBenches = useMemo(
@@ -1014,6 +1078,27 @@ export default function App() {
 
   return (
     <div className={`app ${isDesktop ? 'is-desktop' : 'is-mobile'} ${menuOpen ? 'menu-open' : ''}`}>
+      {splashVisible && (
+        <div className="startup-splash" role="status" aria-live="polite">
+          <div className="startup-splash-inner">
+            <img src="./favicon.svg" alt="" width={72} height={72} className="startup-splash-logo" />
+            <div className="startup-splash-title">
+              Find<b>My</b>Bench
+            </div>
+            <div className="startup-splash-welcome">
+              Welcome — finding great places to sit, pause, and take in the view.
+            </div>
+            <div className="startup-splash-track" aria-hidden="true">
+              <div
+                className="startup-splash-fill"
+                style={{ width: `${splashProgress.toFixed(1)}%` }}
+              />
+            </div>
+            <div className="startup-splash-caption">{splashMessage}</div>
+          </div>
+        </div>
+      )}
+
       {isDesktop && (
         <aside className="sidebar">
           <header className="sidebar-head">
@@ -1147,7 +1232,11 @@ export default function App() {
         )}
 
         {isMobile && (
-          <BottomSheet state={sheet} onState={setSheet}>
+          <BottomSheet
+            state={sheet}
+            onState={setSheet}
+            resetKey={`${view.kind}:${view.kind === 'detail' || view.kind === 'edit' ? view.id : ''}:${pickMode ? 'pick' : 'view'}`}
+          >
             {panel}
           </BottomSheet>
         )}
