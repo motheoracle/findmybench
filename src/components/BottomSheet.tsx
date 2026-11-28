@@ -1,4 +1,4 @@
-import { useRef, type ReactNode, type PointerEvent } from 'react';
+import { useEffect, useRef, type ReactNode, type PointerEvent } from 'react';
 
 export type SheetState = 'peek' | 'half' | 'full';
 
@@ -13,22 +13,43 @@ function heightFor(state: SheetState): number {
 }
 
 /**
- * Mobile bottom sheet with drag-to-snap. On ≥768px the same children render in the sidebar
+ * Mobile bottom sheet with drag-to-snap. On >=768px the same children render in the sidebar
  * instead (see App), so this component only handles small screens.
  */
 export default function BottomSheet({
   state,
   onState,
+  resetKey,
   header,
   children,
 }: {
   state: SheetState;
   onState(s: SheetState): void;
+  resetKey?: string | number;
   header?: ReactNode;
   children: ReactNode;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const prevStateRef = useRef<SheetState>(state);
+  const prevResetKeyRef = useRef<string | number | undefined>(resetKey);
   const drag = useRef<{ y: number; h: number; moved: boolean } | null>(null);
+
+  useEffect(() => {
+    const prevState = prevStateRef.current;
+    const prevKey = prevResetKeyRef.current;
+    prevStateRef.current = state;
+    prevResetKeyRef.current = resetKey;
+
+    if (state === 'peek') return;
+    const keyChanged = resetKey !== prevKey;
+    const expandedFromPeek = prevState === 'peek';
+
+    if (keyChanged || expandedFromPeek) {
+      const body = bodyRef.current;
+      if (body) body.scrollTop = 0;
+    }
+  }, [resetKey, state]);
 
   const onDown = (e: PointerEvent) => {
     const el = sheetRef.current;
@@ -84,7 +105,7 @@ export default function BottomSheet({
         <span />
         {header}
       </div>
-      <div className="sheet-body">{children}</div>
+      <div ref={bodyRef} className="sheet-body">{children}</div>
     </div>
   );
 }
