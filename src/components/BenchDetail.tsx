@@ -5,6 +5,8 @@ import { compressImage } from '../utils/image';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import PaywallCard from './PaywallCard';
 
+const PUBLIC_WEB_ORIGIN = 'https://findmybench.netlify.app';
+
 export default function BenchDetail({
   view,
   isOwner,
@@ -74,7 +76,10 @@ export default function BenchDetail({
 
   const copyLink = async () => {
     try {
-      const url = new URL(window.location.href);
+      const host = window.location.hostname;
+      const isLocal = !host || host === 'localhost' || host === '127.0.0.1';
+      const baseOrigin = isLocal ? PUBLIC_WEB_ORIGIN : window.location.origin;
+      const url = new URL('/', baseOrigin);
       url.searchParams.set('bench', bench.id);
       await navigator.clipboard?.writeText(url.toString());
     } catch {
