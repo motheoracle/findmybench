@@ -6,7 +6,7 @@ import maplibregl, {
   type MapLayerMouseEvent,
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import type { FeatureCollection, Point } from 'geojson';
+import type { FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { LngLat, MapLayerMode, ViewBench } from '../types';
 import { ACTIVE_REGION } from '../config/regions';
 import { LABEL_FONT, OFFLINE_STYLE, resolveStyle } from '../config/mapStyles';
@@ -15,6 +15,10 @@ export type MapStatus = 'loading' | 'ok' | 'offline' | 'degraded';
 export interface FlyTarget extends LngLat {
   zoom?: number;
   key: number;
+}
+export interface MapRouteTarget extends LngLat {
+  id: string;
+  name: string;
 }
 
 interface Props {
@@ -25,6 +29,11 @@ interface Props {
   pickMode: boolean;
   draft: LngLat | null;
   flyTarget: FlyTarget | null;
+  routeTarget?: MapRouteTarget | null;
+  routeOrigin?: LngLat | null;
+  routeCoords?: [number, number][] | null;
+  userLocation?: LngLat | null;
+  userHeadingDeg?: number | null;
   isMobile: boolean;
   onSelect(id: string): void;
   onPick(p: LngLat): void;
@@ -33,6 +42,10 @@ interface Props {
 }
 
 const SRC = 'benches';
+const ROUTE_SRC = 'route-target';
+const ROUTE_LINE_SRC = 'route-line';
+const USER_LOC_SRC = 'user-location';
+const USER_CONE_SRC = 'user-facing-cone';
 const COLORS = {
   standard: '#2f7d4f',
   obscure: '#6b4fbf',
@@ -40,6 +53,7 @@ const COLORS = {
   cluster: '#1f3d2b',
   cream: '#f3ead8',
   amber: '#e0a43a',
+  route: '#2563eb',
 };
 
 function toGeoJSON(benches: ViewBench[]): FeatureCollection<Point> {
@@ -54,6 +68,125 @@ function toGeoJSON(benches: ViewBench[]): FeatureCollection<Point> {
         state: v.locked ? 'locked' : v.bench.tier,
       },
     })),
+  };
+}
+
+function toPointGeoJSON(point: LngLat | null | undefined): FeatureCollection<Point> {
+  if (!point) {
+    return { type: 'FeatureCollection', features: [] };
+  }
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [point.lng, point.lat] },
+        properties: {},
+      },
+    ],
+  };
+}
+
+function offsetLngLatMeters(
+  center: LngLat,
+  distanceMeters: number,
+  bearingDeg: number,
+): [number, number] {
+  const R = 6371000;
+  const brng = (bearingDeg * Math.PI) / 180;
+  const lat1 = (center.lat * Math.PI) / 180;
+  const lng1 = (center.lng * Math.PI) / 180;
+  const angDist = distanceMeters / R;
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angDist) +
+      Math.cos(lat1) * Math.sin(angDist) * Math.cos(brng),
+  );
+  const lng2 =
+    lng1 +
+    Math.atan2(
+      Math.sin(brng) * Math.sin(angDist) * Math.cos(lat1),
+      Math.cos(angDist) - Math.sin(lat1) * Math.sin(lat2),
+    );
+
+  return [(lng2 * 180) / Math.PI, (lat2 * 180) / Math.PI];
+}
+
+function toFacingConeGeoJSON(
+  point: LngLat | null | undefined,
+  headingDeg: number | null | undefined,
+): FeatureCollection<Polygon> {
+  if (!point || typeof headingDeg !== 'number' || Number.isNaN(headingDeg)) {
+    return { type: 'FeatureCollection', features: [] };
+  }
+
+  const spreadHalfDeg = 28;
+  const radiusMeters = 32;
+  const steps = 10;
+  const startBearing = headingDeg - spreadHalfDeg;
+  const endBearing = headingDeg + spreadHalfDeg;
+
+  const ring: [number, number][] = [[point.lng, point.lat]];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const bearing = startBearing + (endBearing - startBearing) * t;
+    ring.push(offsetLngLatMeters(point, radiusMeters, bearing));
+  }
+  ring.push([point.lng, point.lat]);
+
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [ring],
+        },
+        properties: {},
+      },
+    ],
+  };
+}
+
+function toRouteLineGeoJSON(
+  coords: [number, number][] | null | undefined,
+  origin: LngLat | null | undefined,
+  target: MapRouteTarget | null | undefined,
+): FeatureCollection<LineString> {
+  if (Array.isArray(coords) && coords.length >= 2) {
+    return {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: coords,
+          },
+          properties: {},
+        },
+      ],
+    };
+  }
+  if (!origin || !target) {
+    return { type: 'FeatureCollection', features: [] };
+  }
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [origin.lng, origin.lat],
+            [target.lng, target.lat],
+          ],
+        },
+        properties: {},
+      },
+    ],
   };
 }
 
@@ -80,106 +213,217 @@ export default function MapView(props: Props) {
 
   // ---------- helpers ----------
   const addBenchLayers = (map: MLMap) => {
-    if (map.getSource(SRC)) return;
-    const hasGlyphs = !!map.getStyle()?.glyphs;
+    if (!map.getSource(SRC)) {
+      const hasGlyphs = !!map.getStyle()?.glyphs;
 
-    map.addSource(SRC, {
-      type: 'geojson',
-      data: toGeoJSON(latest.current.benches),
-      cluster: true,
-      clusterRadius: 48,
-      clusterMaxZoom: 12,
-    });
+      map.addSource(SRC, {
+        type: 'geojson',
+        data: toGeoJSON(latest.current.benches),
+        cluster: true,
+        clusterRadius: 48,
+        clusterMaxZoom: 12,
+      });
 
-    // Approximate-area halo for locked (obscure) benches — shows *where-ish*, not *where*.
-    map.addLayer({
-      id: 'bench-locked-area',
-      type: 'circle',
-      source: SRC,
-      minzoom: 8,
-      filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'state'], 'locked']],
-      paint: {
-        // ≈1.5 km radius in screen pixels at UK latitudes
-        'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 8, 4, 16, 1050],
-        'circle-color': COLORS.obscure,
-        'circle-opacity': 0.08,
-        'circle-stroke-width': 1.5,
-        'circle-stroke-color': COLORS.obscure,
-        'circle-stroke-opacity': 0.35,
-      },
-    });
-
-    map.addLayer({
-      id: 'bench-clusters',
-      type: 'circle',
-      source: SRC,
-      filter: ['has', 'point_count'],
-      paint: {
-        'circle-color': COLORS.cluster,
-        'circle-opacity': 0.92,
-        'circle-radius': ['step', ['get', 'point_count'], 16, 5, 20, 15, 26],
-        'circle-stroke-width': 3,
-        'circle-stroke-color': COLORS.cream,
-      },
-    });
-
-    if (hasGlyphs) {
+      // Approximate-area halo for locked (obscure) benches — shows *where-ish*, not *where*.
       map.addLayer({
-        id: 'bench-cluster-count',
-        type: 'symbol',
+        id: 'bench-locked-area',
+        type: 'circle',
+        source: SRC,
+        minzoom: 8,
+        filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'state'], 'locked']],
+        paint: {
+          // ≈1.5 km radius in screen pixels at UK latitudes
+          'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 8, 4, 16, 1050],
+          'circle-color': COLORS.obscure,
+          'circle-opacity': 0.08,
+          'circle-stroke-width': 1.5,
+          'circle-stroke-color': COLORS.obscure,
+          'circle-stroke-opacity': 0.35,
+        },
+      });
+
+      map.addLayer({
+        id: 'bench-clusters',
+        type: 'circle',
         source: SRC,
         filter: ['has', 'point_count'],
-        layout: {
-          'text-field': ['get', 'point_count_abbreviated'],
-          'text-font': LABEL_FONT,
-          'text-size': 13,
-          'text-allow-overlap': true,
+        paint: {
+          'circle-color': COLORS.cluster,
+          'circle-opacity': 0.92,
+          'circle-radius': ['step', ['get', 'point_count'], 16, 5, 20, 15, 26],
+          'circle-stroke-width': 3,
+          'circle-stroke-color': COLORS.cream,
         },
-        paint: { 'text-color': COLORS.cream },
+      });
+
+      if (hasGlyphs) {
+        map.addLayer({
+          id: 'bench-cluster-count',
+          type: 'symbol',
+          source: SRC,
+          filter: ['has', 'point_count'],
+          layout: {
+            'text-field': ['get', 'point_count_abbreviated'],
+            'text-font': LABEL_FONT,
+            'text-size': 13,
+            'text-allow-overlap': true,
+          },
+          paint: { 'text-color': COLORS.cream },
+        });
+      }
+
+      map.addLayer({
+        id: 'bench-selected',
+        type: 'circle',
+        source: SRC,
+        filter: selectedFilter(latest.current.selectedId),
+        paint: {
+          'circle-radius': 19,
+          'circle-color': COLORS.amber,
+          'circle-opacity': 0.3,
+          'circle-stroke-width': 2,
+          'circle-stroke-color': COLORS.amber,
+        },
+      });
+
+      map.addLayer({
+        id: 'bench-points',
+        type: 'circle',
+        source: SRC,
+        filter: ['!', ['has', 'point_count']],
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 6.5, 12, 9, 16, 11],
+          'circle-color': [
+            'match', ['get', 'state'],
+            'standard', COLORS.standard,
+            'obscure', COLORS.obscure,
+            'locked', COLORS.locked,
+            COLORS.standard,
+          ],
+          'circle-stroke-width': 2.5,
+          'circle-stroke-color': ['match', ['get', 'state'], 'locked', '#3b3f46', '#ffffff'],
+        },
+      });
+
+      // Centre "keyhole" dot marks locked pins at a glance.
+      map.addLayer({
+        id: 'bench-lock-dot',
+        type: 'circle',
+        source: SRC,
+        filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'state'], 'locked']],
+        paint: { 'circle-radius': 2.6, 'circle-color': '#2b2e33' },
       });
     }
 
-    map.addLayer({
-      id: 'bench-selected',
-      type: 'circle',
-      source: SRC,
-      filter: selectedFilter(latest.current.selectedId),
-      paint: {
-        'circle-radius': 19,
-        'circle-color': COLORS.amber,
-        'circle-opacity': 0.3,
-        'circle-stroke-width': 2,
-        'circle-stroke-color': COLORS.amber,
-      },
-    });
+    if (!map.getSource(ROUTE_LINE_SRC)) {
+      map.addSource(ROUTE_LINE_SRC, {
+        type: 'geojson',
+        data: toRouteLineGeoJSON(
+          latest.current.routeCoords,
+          latest.current.routeOrigin,
+          latest.current.routeTarget,
+        ),
+      });
 
-    map.addLayer({
-      id: 'bench-points',
-      type: 'circle',
-      source: SRC,
-      filter: ['!', ['has', 'point_count']],
-      paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 6.5, 12, 9, 16, 11],
-        'circle-color': [
-          'match', ['get', 'state'],
-          'standard', COLORS.standard,
-          'obscure', COLORS.obscure,
-          'locked', COLORS.locked,
-          COLORS.standard,
-        ],
-        'circle-stroke-width': 2.5,
-        'circle-stroke-color': ['match', ['get', 'state'], 'locked', '#3b3f46', '#ffffff'],
-      },
-    });
+      map.addLayer({
+        id: 'route-line',
+        type: 'line',
+        source: ROUTE_LINE_SRC,
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round',
+        },
+        paint: {
+          'line-color': COLORS.route,
+          'line-width': 4,
+          'line-dasharray': [2, 1.5],
+          'line-opacity': 0.85,
+        },
+      });
+    }
 
-    // Centre "keyhole" dot marks locked pins at a glance.
-    map.addLayer({
-      id: 'bench-lock-dot',
-      type: 'circle',
-      source: SRC,
-      filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'state'], 'locked']],
-      paint: { 'circle-radius': 2.6, 'circle-color': '#2b2e33' },
-    });
+    if (!map.getSource(ROUTE_SRC)) {
+      map.addSource(ROUTE_SRC, {
+        type: 'geojson',
+        data: toPointGeoJSON(latest.current.routeTarget),
+      });
+
+      map.addLayer({
+        id: 'route-target-ring',
+        type: 'circle',
+        source: ROUTE_SRC,
+        paint: {
+          'circle-radius': 24,
+          'circle-color': COLORS.route,
+          'circle-opacity': 0.18,
+          'circle-stroke-width': 2.5,
+          'circle-stroke-color': COLORS.route,
+        },
+      });
+
+      map.addLayer({
+        id: 'route-target-dot',
+        type: 'circle',
+        source: ROUTE_SRC,
+        paint: {
+          'circle-radius': 7,
+          'circle-color': COLORS.route,
+          'circle-stroke-width': 2.5,
+          'circle-stroke-color': '#ffffff',
+        },
+      });
+    }
+
+    if (!map.getSource(USER_CONE_SRC)) {
+      const activePoint = latest.current.userLocation ?? latest.current.routeOrigin;
+      map.addSource(USER_CONE_SRC, {
+        type: 'geojson',
+        data: toFacingConeGeoJSON(activePoint, latest.current.userHeadingDeg),
+      });
+
+      map.addLayer({
+        id: 'user-facing-cone-fill',
+        type: 'fill',
+        source: USER_CONE_SRC,
+        paint: {
+          'fill-color': COLORS.route,
+          'fill-opacity': 0.24,
+        },
+      });
+    }
+
+    if (!map.getSource(USER_LOC_SRC)) {
+      map.addSource(USER_LOC_SRC, {
+        type: 'geojson',
+        data: toPointGeoJSON(latest.current.userLocation ?? latest.current.routeOrigin),
+      });
+
+      map.addLayer({
+        id: 'user-location-halo',
+        type: 'circle',
+        source: USER_LOC_SRC,
+        paint: {
+          'circle-radius': 18,
+          'circle-color': COLORS.route,
+          'circle-opacity': 0.22,
+          'circle-stroke-width': 1.5,
+          'circle-stroke-color': COLORS.route,
+          'circle-stroke-opacity': 0.5,
+        },
+      });
+
+      map.addLayer({
+        id: 'user-location-dot',
+        type: 'circle',
+        source: USER_LOC_SRC,
+        paint: {
+          'circle-radius': 7.5,
+          'circle-color': COLORS.route,
+          'circle-stroke-width': 3,
+          'circle-stroke-color': '#ffffff',
+        },
+      });
+    }
   };
 
   /** Fetch + apply the style for `mode`. Bench layers are re-added on every `style.load`. */
@@ -254,7 +498,15 @@ export default function MapView(props: Props) {
     map.on('error', (ev) => {
       // Tile errors after load (e.g. a provider rate-limits) → flag degraded, keep app usable.
       const sourceId = (ev as unknown as { sourceId?: string }).sourceId;
-      if (sourceId && sourceId !== SRC && realLoadedRef.current) {
+      if (
+        sourceId &&
+        sourceId !== SRC &&
+        sourceId !== ROUTE_SRC &&
+        sourceId !== ROUTE_LINE_SRC &&
+        sourceId !== USER_LOC_SRC &&
+        sourceId !== USER_CONE_SRC &&
+        realLoadedRef.current
+      ) {
         tileErrorsRef.current += 1;
         if (tileErrorsRef.current === 8) latest.current.onStatus('degraded');
       }
@@ -325,6 +577,27 @@ export default function MapView(props: Props) {
     const src = mapRef.current?.getSource(SRC) as GeoJSONSource | undefined;
     src?.setData(toGeoJSON(props.benches));
   }, [props.benches, styleRev]);
+
+  useEffect(() => {
+    const activePoint = props.userLocation ?? props.routeOrigin ?? null;
+    const routeSrc = mapRef.current?.getSource(ROUTE_SRC) as GeoJSONSource | undefined;
+    routeSrc?.setData(toPointGeoJSON(props.routeTarget ?? null));
+    const lineSrc = mapRef.current?.getSource(ROUTE_LINE_SRC) as GeoJSONSource | undefined;
+    lineSrc?.setData(
+      toRouteLineGeoJSON(props.routeCoords ?? null, props.routeOrigin ?? null, props.routeTarget ?? null),
+    );
+    const userSrc = mapRef.current?.getSource(USER_LOC_SRC) as GeoJSONSource | undefined;
+    userSrc?.setData(toPointGeoJSON(activePoint));
+    const coneSrc = mapRef.current?.getSource(USER_CONE_SRC) as GeoJSONSource | undefined;
+    coneSrc?.setData(toFacingConeGeoJSON(activePoint, props.userHeadingDeg ?? null));
+  }, [
+    props.routeCoords,
+    props.routeOrigin,
+    props.routeTarget,
+    props.userLocation,
+    props.userHeadingDeg,
+    styleRev,
+  ]);
 
   useEffect(() => {
     const map = mapRef.current;

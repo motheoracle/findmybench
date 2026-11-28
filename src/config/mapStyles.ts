@@ -9,25 +9,40 @@ import type { MapLayerMode } from '../types';
 /**
  * Map layer sources — ALL THREE MODES ARE FREE FOR EVERY USER. Never gate these behind the subscription.
  *
- * Default   OpenFreeMap "Liberty" — keyless, no request limits, actively maintained vector style
- *           built on fresh OpenStreetMap data. Crisp at any zoom / pixel density.
- * Satellite Esri World Imagery (sharpest free global imagery, ~0.3–0.5 m in UK towns, to z19)
- *           + a hybrid overlay of OpenFreeMap vector labels, roads and FOOTPATHS (handy for finding benches).
- * Terrain   OpenFreeMap Liberty base + Mapterhorn hillshade (open DEM: Copernicus GLO-30 and
- *           higher-res national data, Terrarium WebP, keyless)
- *           + contour lines generated in the browser from the same DEM (maplibre-contour).
- *
- * Every URL is overridable via .env (see .env.example) — e.g. swap in MapTiler, Stadia,
- * Ordnance Survey (OS Maps API) or self-hosted PMTiles without code changes.
- * Fallbacks: if the vector style can't be fetched, Satellite degrades to imagery-only and
- * Terrain to OpenTopoMap raster tiles; MapView falls back to a plain offline background.
+ * - Default   OpenFreeMap "Liberty" — keyless, actively maintained vector style built on OpenStreetMap data.
+ *             Can also use a free-tier MapTiler or Mapbox style via .env if desired.
+ * - Satellite Esri World Imagery (high-res global/UK aerial tiles, to z19) + hybrid vector roads,
+ *             footpaths/tracks, and labels. Overridable via VITE_SATELLITE_TILES, VITE_MAPTILER_KEY,
+ *             or VITE_MAPBOX_TOKEN.
+ * - Terrain   OpenFreeMap Liberty base + Mapterhorn hillshade (Terrarium DEM) + browser-generated
+ *             contour lines (maplibre-contour), with OpenTopoMap raster fallback.
  */
 const env = import.meta.env;
 
-const VECTOR_STYLE_URL: string = env.VITE_MAP_STYLE_DEFAULT ?? 'https://tiles.openfreemap.org/styles/liberty';
-const SATELLITE_TILES: string =
-  env.VITE_SATELLITE_TILES ??
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const MAPTILER_KEY: string = (env.VITE_MAPTILER_KEY ?? '').trim();
+const MAPBOX_TOKEN: string = (env.VITE_MAPBOX_TOKEN ?? '').trim();
+
+const DEFAULT_VECTOR_STYLE = MAPTILER_KEY
+  ? `https://api.maptiler.com/maps/streets-v2/style.json?key=${encodeURIComponent(MAPTILER_KEY)}`
+  : MAPBOX_TOKEN
+    ? `https://api.mapbox.com/styles/v1/mapbox/streets-v12?access_token=${encodeURIComponent(MAPBOX_TOKEN)}`
+    : 'https://tiles.openfreemap.org/styles/liberty';
+
+const DEFAULT_SATELLITE_TILES = MAPTILER_KEY
+  ? `https://api.maptiler.com/tiles/satellite-v2/{z}/{x}/{y}.jpg?key=${encodeURIComponent(MAPTILER_KEY)}`
+  : MAPBOX_TOKEN
+    ? `https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}.jpg90?access_token=${encodeURIComponent(MAPBOX_TOKEN)}`
+    : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+
+const DEFAULT_SATELLITE_ATTRIBUTION = MAPTILER_KEY
+  ? '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> <a href="https://www.openstreetmap.org/copyright" target="_blank">© OpenStreetMap</a>'
+  : MAPBOX_TOKEN
+    ? '<a href="https://www.mapbox.com/about/maps/" target="_blank">© Mapbox</a> <a href="https://www.openstreetmap.org/copyright" target="_blank">© OpenStreetMap</a>'
+    : 'Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community';
+
+const VECTOR_STYLE_URL: string = env.VITE_MAP_STYLE_DEFAULT ?? DEFAULT_VECTOR_STYLE;
+const SATELLITE_TILES: string = env.VITE_SATELLITE_TILES ?? DEFAULT_SATELLITE_TILES;
+const SATELLITE_ATTRIBUTION: string = env.VITE_SATELLITE_ATTRIBUTION ?? DEFAULT_SATELLITE_ATTRIBUTION;
 const SATELLITE_MAXZOOM = Number(env.VITE_SATELLITE_MAXZOOM ?? 19);
 const DEM_TILES: string = env.VITE_DEM_TILES ?? 'https://tiles.mapterhorn.com/{z}/{x}/{y}.webp';
 const DEM_TILE_SIZE = Number(env.VITE_DEM_TILE_SIZE ?? 512);
@@ -186,7 +201,7 @@ function buildSatellite(base: StyleSpecification | null): StyleSpecification {
       tiles: [SATELLITE_TILES],
       tileSize: 256,
       maxzoom: SATELLITE_MAXZOOM,
-      attribution: 'Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+      attribution: SATELLITE_ATTRIBUTION,
     },
   };
   const layers: LayerSpecification[] = [
@@ -264,7 +279,6 @@ function buildTerrainRasterFallback(): StyleSpecification {
  * Resolve the full style for a mode. Throws only when nothing usable can be built
  * (MapView then shows the offline background).
  */
-
 function sanitizeCoastlineLayers(style: StyleSpecification): StyleSpecification {
   if (!Array.isArray(style.layers)) return style;
   for (const layer of style.layers) {
@@ -290,6 +304,7 @@ function sanitizeCoastlineLayers(style: StyleSpecification): StyleSpecification 
   }
   return style;
 }
+
 export async function resolveStyle(mode: MapLayerMode, signal?: AbortSignal): Promise<StyleSpecification> {
   let base: StyleSpecification | null = null;
   try {

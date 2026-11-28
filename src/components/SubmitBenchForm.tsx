@@ -16,8 +16,8 @@ export interface SubmitPayload {
 }
 
 /**
- * "Log a Bench" (mode=create) and "Edit bench" (mode=edit) share this form.
- * Location lives in App state (the map sets it), so it's passed in as `draft`.
+- "Log a Bench" (mode=create) and "Edit bench" (mode=edit) share this form.
+- Location lives in App state (the map sets it), so it's passed in as `draft`.
  */
 export default function SubmitBenchForm({
   mode,
@@ -63,9 +63,10 @@ export default function SubmitBenchForm({
   const [errors, setErrors] = useState<string[]>([]);
   const cameraRef = useRef<HTMLInputElement>(null);
   const libraryRef = useRef<HTMLInputElement>(null);
+  const isEditingExisting = mode === 'edit';
 
   const onFile = async (file: File | undefined) => {
-    if (!file) return;
+    if (!file || isEditingExisting) return;
     setPhotoBusy(true);
     try {
       setPhoto(await compressImage(file));
@@ -95,7 +96,7 @@ export default function SubmitBenchForm({
       materialNote: materialNote.trim() || undefined,
       directions: directions.trim(),
       notes: notes.trim() || undefined,
-      photo,
+      photo: isEditingExisting ? initial?.photo : photo,
     });
   };
 
@@ -182,8 +183,23 @@ export default function SubmitBenchForm({
 
       {/* 3. Photo */}
       <fieldset className="block">
-        <legend><span className="step">3</span> Main photo <em>optional</em></legend>
-        {photo ? (
+        <legend>
+          <span className="step">3</span> Main photo <em>{isEditingExisting ? 'locked' : 'optional'}</em>
+        </legend>
+        {isEditingExisting ? (
+          <>
+            {photo ? (
+              <div className="photo-preview">
+                <img src={photo} alt="Main bench photo" />
+              </div>
+            ) : (
+              <p className="muted small">No initial main photo on this bench.</p>
+            )}
+            <p className="fine">
+              The initial photo stays as the main photo unless updated by a designated bench photographer. Add extra views in the photo gallery.
+            </p>
+          </>
+        ) : photo ? (
           <div className="photo-preview">
             <img src={photo} alt="Bench preview" />
             <div className="row-actions">
@@ -203,10 +219,12 @@ export default function SubmitBenchForm({
             </button>
           </div>
         )}
-        {photoBusy && <p className="muted small">Processing photo…</p>}
+        {!isEditingExisting && photoBusy && <p className="muted small">Processing photo…</p>}
         <input ref={cameraRef} type="file" accept="image/*" capture="environment" hidden onChange={(e) => { void onFile(e.target.files?.[0]); e.target.value = ''; }} />
         <input ref={libraryRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" hidden onChange={(e) => { void onFile(e.target.files?.[0]); e.target.value = ''; }} />
-        <p className="fine">Not in position for a photo? Skip it — you or others can add gallery photos later.</p>
+        {!isEditingExisting && (
+          <p className="fine">Your first photo becomes the bench's main photo. Extra views can be added to the gallery later.</p>
+        )}
       </fieldset>
 
       {/* 4. Difficulty */}

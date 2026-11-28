@@ -104,6 +104,12 @@ function fromDbPhotoTag(tag: PhotoRow['context_tag']): PhotoTag {
   }
 }
 
+function resolvePhotoStatus(row: Pick<PhotoRow, 'is_hidden' | 'report_count'>): ModerationStatus {
+  if (row.report_count > 0) return 'flagged';
+  if (row.is_hidden) return 'hidden';
+  return 'visible';
+}
+
 function dataUrlToBlob(dataUrl: string): { blob: Blob; ext: string } {
   const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(dataUrl);
   if (!match) {
@@ -146,6 +152,20 @@ async function uploadPhotoToBucket(userId: string, benchId: string, src: string)
   return data.publicUrl;
 }
 
+async function removePhotoFromBucketIfOwnedUrl(photoSrc?: string): Promise<void> {
+  if (!photoSrc) return;
+  const marker = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
+  const idx = photoSrc.indexOf(marker);
+  if (idx === -1) return;
+  const storagePath = decodeURIComponent(photoSrc.slice(idx + marker.length).split('?')[0]);
+  if (!storagePath) return;
+  try {
+    await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
+  } catch {
+    // Ignore storage cleanup failure
+  }
+}
+
 class SupabaseBenchService {
   private benchCache = new Map<string, Bench>();
   private profileCache: Record<string, ProfileRow> = {};
@@ -182,6 +202,7 @@ class SupabaseBenchService {
       directions: row.directions,
       notes: row.notes ?? undefined,
       photo: row.photo_url ?? undefined,
+      mainPhotoSetByPhotographer: false,
       createdBy: {
         id: row.owner_id,
         name: prof?.display_name ?? 'Bench Explorer',
@@ -233,7 +254,9 @@ class SupabaseBenchService {
       };
     }
 
-    if (profile) { this.profileCache[profile.id] = profile; }
+    if (profile) {
+      this.profileCache[profile.id] = profile;
+    }
 
     return {
       id: authUser.id,
@@ -241,6 +264,7 @@ class SupabaseBenchService {
       email: authUser.email ?? '',
       age: profile?.age ?? undefined,
       avatar: profile?.avatar_url ?? undefined,
+      role: 'user',
       prefs: {
         creditAnonymously: false,
         defaultLayer: 'default',
@@ -283,6 +307,20 @@ class SupabaseBenchService {
     }
     const user = await this.getCurrentUser();
     return { user, needsConfirmation: false };
+  }
+
+  async resendConfirmationEmail(email: string): Promise<void> {
+    const trimmed = email.trim();
+    if (!trimmed) {
+      throw new Error('Enter your email address first.');
+    }
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
+      email: trimmed,
+    });
+    if (error) {
+      throw new Error(error.message || 'Could not resend confirmation email.');
+    }
   }
 
   async signOut(): Promise<void> {
@@ -429,6 +467,22 @@ class SupabaseBenchService {
       throw new Error(error?.message || 'Could not save bench.');
     }
 
+    if (photoUrl) {
+      try {
+        await supabase.from('bench_photos').insert({
+          bench_id: benchId,
+          uploader_id: ownerId,
+          photo_url: photoUrl,
+          context_tag: toDbPhotoTag('bench-view'),
+          caption: 'Initial bench photo',
+          is_hidden: false,
+          report_count: 0,
+        });
+      } catch {
+        // Ignore if initial gallery row fails
+      }
+    }
+
     const profiles = await this.ensureProfiles([ownerId]);
     const mapped = this.mapBenchRow(data as BenchRow, profiles);
     this.benchCache.set(mapped.id, mapped);
@@ -454,10 +508,7 @@ class SupabaseBenchService {
       throw new DuplicateBenchError(dup);
     }
 
-    let photoUrl: string | null = patch.photo ?? null;
-    if (patch.photo && patch.photo.startsWith('data:')) {
-      photoUrl = await uploadPhotoToBucket(actorId, id, patch.photo);
-    }
+    const preservedMainPhotoUrl: string | null = current.photo ?? null;
 
     const { data, error } = await supabase
       .from('benches')
@@ -468,7 +519,7 @@ class SupabaseBenchService {
         material_note: patch.materialNote?.trim() || null,
         directions: patch.directions.trim(),
         notes: patch.notes?.trim() || null,
-        photo_url: photoUrl,
+        photo_url: preservedMainPhotoUrl,
         lat: roundCoord(patch.lat),
         lng: roundCoord(patch.lng),
         updated_at: new Date().toISOString(),
@@ -484,6 +535,56 @@ class SupabaseBenchService {
 
     const profiles = await this.ensureProfiles([actorId]);
     const mapped = this.mapBenchRow(data as BenchRow, profiles);
+    this.benchCache.set(mapped.id, mapped);
+    return mapped;
+  }
+
+  async setMainPhotoAsPhotographer(
+    benchId: string,
+    photographerId: string,
+    newPhotoSrc: string,
+  ): Promise<Bench> {
+    if (!isUuid(benchId)) {
+      throw new Error('Invalid bench ID.');
+    }
+    const photoUrl = await uploadPhotoToBucket(photographerId, benchId, newPhotoSrc);
+    const nowIso = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from('benches')
+      .update({
+        photo_url: photoUrl,
+        updated_at: nowIso,
+      })
+      .eq('id', benchId)
+      .select('id, owner_id, name, lat, lng, difficulty, material, material_note, directions, notes, photo_url, created_at, updated_at')
+      .single();
+
+    if (error || !data) {
+      throw new Error(error?.message || 'Could not update main bench photo.');
+    }
+
+    try {
+      await supabase.from('bench_photos').insert({
+        bench_id: benchId,
+        uploader_id: photographerId,
+        photo_url: photoUrl,
+        context_tag: toDbPhotoTag('bench-view'),
+        caption: 'Updated main bench photo',
+        is_hidden: false,
+        report_count: 0,
+      });
+    } catch {
+      // Ignore if gallery row fails
+    }
+
+    const row = data as BenchRow;
+    const profiles = await this.ensureProfiles([row.owner_id, photographerId]);
+    const mapped: Bench = {
+      ...this.mapBenchRow(row, profiles),
+      mainPhotoSetByPhotographer: true,
+      mainPhotoUpdatedAt: nowIso,
+    };
     this.benchCache.set(mapped.id, mapped);
     return mapped;
   }
@@ -599,7 +700,9 @@ class SupabaseBenchService {
       throw new Error(error.message || 'Failed to load bench photos.');
     }
 
-    const rows = ((data ?? []) as PhotoRow[]).filter((r) => !r.is_hidden || r.uploader_id === viewerId);
+    const rows = ((data ?? []) as PhotoRow[]).filter(
+      (r) => (!r.is_hidden && r.report_count === 0) || r.uploader_id === viewerId,
+    );
     const profiles = await this.ensureProfiles(rows.map((r) => r.uploader_id));
 
     return rows.map((r) => ({
@@ -619,9 +722,92 @@ class SupabaseBenchService {
       bytes: 0,
       contentHash: '',
       createdAt: r.created_at,
-      status: r.is_hidden ? 'hidden' : r.report_count > 0 ? 'flagged' : 'visible',
+      status: resolvePhotoStatus(r),
       reports: [],
     }));
+  }
+
+  async listFlaggedPhotos(): Promise<GalleryPhoto[]> {
+    const { data, error } = await supabase
+      .from('bench_photos')
+      .select('id, bench_id, uploader_id, photo_url, context_tag, caption, is_hidden, report_count, created_at')
+      .or('is_hidden.eq.true,report_count.gt.0')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new Error(error.message || 'Failed to load moderation queue.');
+    }
+
+    const rows = (data ?? []) as PhotoRow[];
+    const profiles = await this.ensureProfiles(rows.map((r) => r.uploader_id));
+
+    return rows.map((r) => ({
+      id: r.id,
+      benchId: r.bench_id,
+      author: {
+        id: r.uploader_id,
+        name: profiles[r.uploader_id]?.display_name ?? 'Bench Explorer',
+        age: profiles[r.uploader_id]?.age ?? undefined,
+        avatar: profiles[r.uploader_id]?.avatar_url ?? undefined,
+      },
+      src: r.photo_url,
+      tag: fromDbPhotoTag(r.context_tag),
+      caption: r.caption ?? '',
+      width: 0,
+      height: 0,
+      bytes: 0,
+      contentHash: '',
+      createdAt: r.created_at,
+      status: resolvePhotoStatus(r),
+      reports: [],
+    }));
+  }
+
+  async moderatePhoto(
+    photoId: string,
+    decision: ModerationStatus | 'delete',
+    photoSrc?: string,
+  ): Promise<void> {
+    if (!isUuid(photoId)) return;
+
+    if (decision === 'delete') {
+      const { data, error } = await supabase
+        .from('bench_photos')
+        .delete()
+        .eq('id', photoId)
+        .select('id');
+      if (error) {
+        throw new Error(error.message || 'Could not delete photo.');
+      }
+      if (!data || data.length === 0) {
+        throw new Error(
+          'Delete blocked by Supabase RLS policy — grant moderator DELETE permission on bench_photos.',
+        );
+      }
+      await removePhotoFromBucketIfOwnedUrl(photoSrc);
+      return;
+    }
+
+    const patch =
+      decision === 'visible'
+        ? { is_hidden: false, report_count: 0 }
+        : decision === 'flagged'
+          ? { is_hidden: true, report_count: 1 }
+          : { is_hidden: true, report_count: 0 };
+
+    const { data, error } = await supabase
+      .from('bench_photos')
+      .update(patch)
+      .eq('id', photoId)
+      .select('id');
+    if (error) {
+      throw new Error(error.message || 'Could not update photo moderation status.');
+    }
+    if (!data || data.length === 0) {
+      throw new Error(
+        'Update blocked by Supabase RLS policy — grant moderator UPDATE permission on bench_photos.',
+      );
+    }
   }
 
   async addPhoto(input: {
@@ -634,6 +820,7 @@ class SupabaseBenchService {
     height?: number;
     bytes?: number;
     contentHash?: string;
+    moderationStatus?: ModerationStatus;
   }): Promise<GalleryPhoto> {
     if (!isUuid(input.benchId)) {
       throw new Error('Sample benches do not support Supabase photo uploads yet — log a bench to add photos.');
@@ -646,6 +833,10 @@ class SupabaseBenchService {
       throw new Error('Captions are limited to 240 characters.');
     }
 
+    const status: ModerationStatus = input.moderationStatus ?? 'visible';
+    const isHidden = status === 'hidden' || status === 'flagged';
+    const reportCount = status === 'flagged' ? 1 : 0;
+
     const photoUrl = await uploadPhotoToBucket(input.uploaderId, input.benchId, input.src);
 
     const { data, error } = await supabase
@@ -656,8 +847,8 @@ class SupabaseBenchService {
         photo_url: photoUrl,
         context_tag: toDbPhotoTag(input.tag),
         caption: caption || null,
-        is_hidden: false,
-        report_count: 0,
+        is_hidden: isHidden,
+        report_count: reportCount,
       })
       .select('id, bench_id, uploader_id, photo_url, context_tag, caption, is_hidden, report_count, created_at')
       .single();
@@ -668,6 +859,8 @@ class SupabaseBenchService {
 
     const profiles = await this.ensureProfiles([input.uploaderId]);
     const row = data as PhotoRow;
+    const resolvedStatus = resolvePhotoStatus(row);
+
     return {
       id: row.id,
       benchId: row.bench_id,
@@ -683,10 +876,11 @@ class SupabaseBenchService {
       bytes: input.bytes ?? 0,
       contentHash: input.contentHash ?? '',
       createdAt: row.created_at,
-      status: 'visible',
+      status: resolvedStatus,
       reports: [],
     };
   }
+
   async deletePhoto(photoId: string, actorId: string, photoSrc?: string): Promise<void> {
     if (!isUuid(photoId)) return;
     const { error } = await supabase
@@ -699,18 +893,8 @@ class SupabaseBenchService {
       throw new Error(error.message || 'Could not delete photo.');
     }
 
-    if (photoSrc) {
-      const marker = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
-      const idx = photoSrc.indexOf(marker);
-      if (idx !== -1) {
-        const storagePath = decodeURIComponent(photoSrc.slice(idx + marker.length).split('?')[0]);
-        if (storagePath) {
-          await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]).catch(() => {});
-        }
-      }
-    }
+    await removePhotoFromBucketIfOwnedUrl(photoSrc);
   }
-
 
   async reportPhoto(photoId: string, _reporterId: string, _reason: ReportReason): Promise<void> {
     const { data, error: readErr } = await supabase
@@ -747,11 +931,3 @@ export function validateDisplayName(name: string): string | null {
 }
 
 export const benchService = new SupabaseBenchService();
-
-
-
-
-
-
-
-

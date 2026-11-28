@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">FindMyBench</string>
+    <string name="title_activity_main">FindMyBench</string>
+    <string name="package_name">uk.findmybench.app</string>
+    <string name="custom_url_scheme">uk.findmybench.app</string>
+</resources>

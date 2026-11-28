@@ -1,7 +1,25 @@
-﻿import Modal from './Modal';
+﻿import { useState } from 'react';
+import Modal from './Modal';
 import { ACTIVE_REGION } from '../config/regions';
 
-export default function CheckoutModal({ onClose, onActivate }: { onClose(): void; onActivate(): void }) {
+export interface CheckoutModalProps {
+  checkoutUrl?: string | null;
+  onRefresh: () => void;
+  onClose: () => void;
+}
+
+export default function CheckoutModal({ checkoutUrl, onRefresh, onClose }: CheckoutModalProps) {
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   return (
     <Modal title="FindMyBench Explorer" onClose={onClose}>
       <div className="checkout">
@@ -14,15 +32,27 @@ export default function CheckoutModal({ onClose, onActivate }: { onClose(): void
           <li>Full directions, photos and finder notes</li>
           <li>Support the people logging benches across the UK</li>
         </ul>
-        <div className="demo-note">
-          <strong>Demo checkout.</strong> No payment is taken in this prototype. In production this hands off to
-          App Store / Google Play billing (native) or Stripe (web), e.g. via RevenueCat.
-        </div>
-        <button className="btn btn-amber btn-block" onClick={onActivate}>
-          Activate demo subscription
-        </button>
-        <button className="btn btn-ghost btn-block" onClick={onClose}>
-          Not now
+        {checkoutUrl ? (
+          <a
+            className="btn btn-amber btn-block"
+            href={checkoutUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Continue to checkout
+          </a>
+        ) : (
+          <div className="demo-note">
+            <strong>Checkout link unavailable.</strong> Check your billing configuration or refresh once complete.
+          </div>
+        )}
+        <button
+          type="button"
+          className="btn btn-ghost btn-block"
+          onClick={() => void handleRefresh()}
+          disabled={refreshing}
+        >
+          {refreshing ? 'Refreshing status...' : 'Refresh subscription status'}
         </button>
       </div>
     </Modal>

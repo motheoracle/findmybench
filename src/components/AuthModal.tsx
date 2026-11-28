@@ -1,4 +1,4 @@
-﻿import { useState, type FormEvent } from 'react';
+﻿import { useEffect, useState, type FormEvent } from 'react';
 import Modal from './Modal';
 import { benchService } from '../lib/benchService';
 import type { User } from '../types';
@@ -19,6 +19,39 @@ export default function AuthModal({
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setResendCooldown((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendCooldown]);
+
+  const showResendOption =
+    mode === 'signup' ||
+    Boolean(error && error.toLowerCase().includes('email not confirmed'));
+
+  const handleResend = async () => {
+    if (!email.trim()) {
+      setError('Enter your email address first.');
+      return;
+    }
+    setResending(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await benchService.resendConfirmationEmail(email);
+      setNotice('Confirmation email sent — check your inbox and spam/junk folder.');
+      setResendCooldown(60);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResending(false);
+    }
+  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -35,6 +68,7 @@ export default function AuthModal({
           onSignedIn(res.user);
         } else if (res.needsConfirmation) {
           setNotice('Account created — check your email to confirm your address, then sign in.');
+          setResendCooldown(60);
         }
       }
     } catch (err) {
@@ -101,7 +135,7 @@ export default function AuthModal({
         </label>
         {notice && <div className="muted">{notice}</div>}
         {error && <div className="error">{error}</div>}
-        <button className="btn btn-primary btn-block" disabled={busy}>
+        <button className="btn btn-primary btn-block" disabled={busy || resending}>
           {busy
             ? mode === 'signin'
               ? 'Signing in…'
@@ -110,8 +144,21 @@ export default function AuthModal({
               ? 'Sign in'
               : 'Create account'}
         </button>
+        {showResendOption && (
+          <button
+            type="button"
+            className="btn btn-outline btn-block"
+            disabled={busy || resending || resendCooldown > 0}
+            onClick={handleResend}
+          >
+            {resending
+              ? 'Sending confirmation email…'
+              : resendCooldown > 0
+                ? `Resend confirmation email (${resendCooldown}s)`
+                : 'Resend confirmation email'}
+          </button>
+        )}
       </form>
     </Modal>
   );
 }
-

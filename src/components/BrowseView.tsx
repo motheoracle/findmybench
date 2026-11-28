@@ -124,27 +124,42 @@ export default function BrowseView({
         <PaywallCard compact onUnlock={onUnlock} obscureCount={paidCount} />
       )}
 
-        <div className="row-gap" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <span className="muted small">{visible.length} {visible.length === 1 ? 'bench' : 'benches'}</span>
-          <label className="small muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            Sort
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as 'name' | 'newest' | 'nearest')}
-              aria-label="Sort benches"
-              style={{ borderRadius: 8, padding: '4px 8px', border: '1px solid var(--line)', background: '#fff', color: 'var(--ink)' }}
-            >
-              <option value="name">A–Z</option>
-              <option value="newest">Newest</option>
-              <option value="nearest">Nearest</option>
-            </select>
-          </label>
-        </div>
+      <div className="row-gap" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <span className="muted small">{visible.length} {visible.length === 1 ? 'bench' : 'benches'}</span>
+        <label className="small muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          Sort
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as 'name' | 'newest' | 'nearest')}
+            aria-label="Sort benches"
+            style={{ borderRadius: 8, padding: '4px 8px', border: '1px solid var(--line)', background: '#fff', color: 'var(--ink)' }}
+          >
+            <option value="name">A–Z</option>
+            <option value="newest">Newest</option>
+            <option value="nearest">Nearest</option>
+          </select>
+        </label>
+      </div>
       <ul className="bench-list">
         {visible.map((v) => (
           <li key={v.bench.id}>
             <button className="bench-row" onClick={() => onSelect(v.bench.id)}>
-              <i className={`dot ${v.bench.difficulty}`} />
+              {v.bench.photo ? (
+                <img
+                  src={v.bench.photo}
+                  alt={v.bench.name}
+                  className="bench-row-thumb"
+                  style={{
+                    width: 44,
+                    height: 44,
+                    borderRadius: 8,
+                    objectFit: 'cover',
+                    flexShrink: 0,
+                  }}
+                />
+              ) : (
+                <i className={`dot ${v.bench.difficulty}`} />
+              )}
               <div className="bench-row-main">
                 <div className="bench-row-title">
                   {v.bench.name}

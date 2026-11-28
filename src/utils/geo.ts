@@ -11,10 +11,10 @@ function hash01(s: string, salt: number): number {
 }
 
 /**
- * Offset a locked bench by ~1–2 km so the pin shows the *area* only.
- * NOTE: client-side fuzzing is a UX affordance, not security. When the API moves to
- * Supabase, exact coordinates/directions for obscure benches must only be returned
- * to entitled users (RLS / edge function). See supabase/schema.sql.
+- Offset a locked bench by ~1–2 km so the pin shows the *area* only.
+- NOTE: client-side fuzzing is a UX affordance, not security. When the API moves to
+- Supabase, exact coordinates/directions for obscure benches must only be returned
+- to entitled users (RLS / edge function). See supabase/schema.sql.
  */
 export function fuzz(bench: Bench): { lat: number; lng: number } {
   const angle = hash01(bench.id, 1) * Math.PI * 2;
@@ -25,6 +25,9 @@ export function fuzz(bench: Bench): { lat: number; lng: number } {
 }
 
 export const isOwner = (bench: Bench, user: User | null) => !!user && bench.createdBy?.id === user.id;
+
+export const canUpdateMainPhoto = (_bench: Bench, user: User | null) =>
+  !!user && (user.role === 'photographer' || user.role === 'admin');
 
 export function toViewBench(bench: Bench, opts: { subscribed: boolean; user: User | null }): ViewBench {
   const locked = bench.tier === 'obscure' && !opts.subscribed && !isOwner(bench, opts.user);

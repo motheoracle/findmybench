@@ -1,9 +1,10 @@
-﻿import { useState, type ChangeEvent } from 'react';
+﻿import { useEffect, useState, type ChangeEvent } from 'react';
 import Modal from './Modal';
-import type { MapLayerMode, Units, User, UserPreferences } from '../types';
+import type { MapLayerMode, ThemeMode, Units, User, UserPreferences } from '../types';
 import { LAYER_MODES } from '../config/mapStyles';
 import { ANONYMOUS_NAME } from '../config/community';
 import { validateDisplayName } from '../lib/benchService';
+import { openManageSubscription } from '../lib/billingPortal';
 
 function maskEmail(email: string) {
   const [local, domain] = email.split('@');
@@ -24,10 +25,21 @@ export default function AccountSettingsModal({
   const [name, setName] = useState(user.name);
   const [age, setAge] = useState<string>(user.age ? String(user.age) : '');
   const [avatar, setAvatar] = useState<string>(user.avatar ?? '');
-  const [prefs, setPrefs] = useState<UserPreferences>(user.prefs);
+  const [prefs, setPrefs] = useState<UserPreferences>({
+    ...user.prefs,
+    theme: user.prefs.theme ?? 'light',
+  });
   const [revealEmail, setRevealEmail] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [managingSubscription, setManagingSubscription] = useState(false);
+  const [portalError, setPortalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const activeTheme: ThemeMode = prefs.theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', activeTheme);
+    document.documentElement.classList.toggle('dark', activeTheme === 'dark');
+  }, [prefs.theme]);
 
   const cleanAge = age ? parseInt(age, 10) : undefined;
   const ageDisplay = cleanAge ? `, ${cleanAge}` : '';
@@ -47,6 +59,19 @@ export default function AccountSettingsModal({
       setAvatar(reader.result as string);
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleManageSubscription = async () => {
+    setPortalError(null);
+    setManagingSubscription(true);
+    try {
+      await openManageSubscription();
+    } catch (err) {
+      setPortalError(
+        err instanceof Error ? err.message : 'Unable to open subscription portal.'
+      );
+      setManagingSubscription(false);
+    }
   };
 
   const save = async () => {
@@ -125,6 +150,16 @@ export default function AccountSettingsModal({
         <section className="settings-group">
           <h3>Preferences</h3>
           <label className="field">
+            <span>Appearance</span>
+            <select
+              value={prefs.theme ?? 'light'}
+              onChange={(e) => setPrefs({ ...prefs, theme: e.target.value as ThemeMode })}
+            >
+              <option value="light">Light mode</option>
+              <option value="dark">Dark mode</option>
+            </select>
+          </label>
+          <label className="field">
             <span>Map layer on launch <em className="muted">(all layers free)</em></span>
             <select
               value={prefs.defaultLayer}
@@ -164,6 +199,21 @@ export default function AccountSettingsModal({
           <div className="kv">
             <span>Plan</span>
             <span>{subscribed ? 'Explorer - obscure & tricky unlocked' : 'Free'}</span>
+          </div>
+          <div style={{ marginTop: '0.75rem' }}>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline"
+              onClick={handleManageSubscription}
+              disabled={managingSubscription || busy}
+            >
+              {managingSubscription ? 'Opening Portal...' : 'Manage Subscription'}
+            </button>
+            {portalError && (
+              <div className="error" role="alert" style={{ marginTop: '0.5rem' }}>
+                {portalError}
+              </div>
+            )}
           </div>
         </section>
 

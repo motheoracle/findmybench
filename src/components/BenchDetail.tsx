@@ -1,11 +1,14 @@
-﻿import { useMemo, useState } from 'react';
+﻿import { useMemo, useRef, useState } from 'react';
 import type { GalleryPhoto, ViewBench } from '../types';
 import { difficultyLabel, isPaidTier, materialLabel } from '../config/taxonomy';
+import { compressImage } from '../utils/image';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import PaywallCard from './PaywallCard';
 
 export default function BenchDetail({
   view,
   isOwner,
+  canUpdateMainPhoto = false,
   viewerId,
   signedIn,
   photos,
@@ -16,13 +19,16 @@ export default function BenchDetail({
   onBack,
   onUnlock,
   onZoom,
+  onDirections,
   onEdit,
+  onUpdateMainPhoto,
   onAddPhoto,
   onOpenPhoto,
   reviews,
 }: {
   view: ViewBench;
   isOwner: boolean;
+  canUpdateMainPhoto?: boolean;
   viewerId?: string;
   signedIn: boolean;
   photos: GalleryPhoto[];
@@ -33,19 +39,27 @@ export default function BenchDetail({
   onBack(): void;
   onUnlock(): void;
   onZoom(): void;
+  onDirections?(): void;
   onEdit(): void;
+  onUpdateMainPhoto?(photoDataUrl: string): Promise<void> | void;
   onAddPhoto(): void;
   onOpenPhoto(photo: GalleryPhoto): void;
   reviews: React.ReactNode;
 }) {
   const { bench, locked } = view;
+  const isDesktop = useMediaQuery('(min-width: 768px)');
   const [copied, setCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [updatingMainPhoto, setUpdatingMainPhoto] = useState(false);
+  const [hoveredPhotoId, setHoveredPhotoId] = useState<string | null>(null);
+  const mainPhotoInputRef = useRef<HTMLInputElement>(null);
 
   const visiblePhotos = useMemo(
     () => photos.filter((p) => p.status !== 'hidden' || (viewerId && p.author.id === viewerId)),
     [photos, viewerId],
   );
+
+  const mainPhotoSrc = bench.photo || visiblePhotos[0]?.src || undefined;
 
   const copy = async () => {
     const text = `${bench.lat.toFixed(6)}, ${bench.lng.toFixed(6)}`;
@@ -69,6 +83,27 @@ export default function BenchDetail({
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 1600);
   };
+
+  const handleDirectionsClick = () => {
+    if (onDirections) {
+      onDirections();
+      return;
+    }
+    const url = `https://www.openstreetmap.org/?mlat=${bench.lat}&mlon=${bench.lng}#map=17/${bench.lat}/${bench.lng}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleMainPhotoFile = async (file: File | undefined) => {
+    if (!file || !onUpdateMainPhoto) return;
+    setUpdatingMainPhoto(true);
+    try {
+      const compressed = await compressImage(file);
+      await onUpdateMainPhoto(compressed);
+    } finally {
+      setUpdatingMainPhoto(false);
+    }
+  };
+
   const isPaid = isPaidTier(bench.difficulty);
 
   return (
@@ -96,10 +131,15 @@ export default function BenchDetail({
       </p>
 
       <div className="photo-frame">
-        {bench.photo ? (
-          <img src={bench.photo} alt={bench.name} />
+        {mainPhotoSrc ? (
+          <>
+            <img src={mainPhotoSrc} alt={bench.name} />
+            <span className="photo-badge">
+              {bench.mainPhotoSetByPhotographer ? 'Photographer photo' : 'Initial photo'}
+            </span>
+          </>
         ) : (
-                    <div className="photo-placeholder" aria-label="No main photo yet">
+          <div className="photo-placeholder" aria-label="No main photo yet">
             <svg
               className="bench-placeholder-icon"
               viewBox="0 0 64 36"
@@ -164,14 +204,9 @@ export default function BenchDetail({
           )}
 
           <div className="actions">
-            <a
-              className="btn btn-primary"
-              href={`https://www.openstreetmap.org/?mlat=${bench.lat}&mlon=${bench.lng}#map=17/${bench.lat}/${bench.lng}`}
-              target="_blank"
-              rel="noreferrer"
-            >
+            <button type="button" className="btn btn-primary" onClick={handleDirectionsClick}>
               Directions
-            </a>
+            </button>
             <button type="button" className="btn btn-secondary" onClick={copy}>
               {copied ? 'Copied' : 'Copy coords'}
             </button>
@@ -194,19 +229,96 @@ export default function BenchDetail({
               </div>
             </div>
             {visiblePhotos.length > 0 ? (
-              <div className="gallery-grid">
-                {visiblePhotos.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    className={`thumb ${p.status === 'hidden' ? 'status-hidden' : ''}`}
-                    onClick={() => onOpenPhoto(p)}
-                  >
-                    <img src={p.src} alt={p.caption || bench.name} />
-                    {p.caption && <span className="thumb-cap">{p.caption}</span>}
-                    {p.status === 'hidden' && <span className="thumb-flag">Hidden</span>}
-                  </button>
-                ))}
+              <div
+                className="gallery-grid"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: isDesktop ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)',
+                  gap: 10,
+                }}
+              >
+                {visiblePhotos.map((p) => {
+                  const isHovered = hoveredPhotoId === p.id;
+                  return (
+                    <div
+                      key={p.id}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className={`thumb ${p.status === 'hidden' ? 'status-hidden' : ''}`}
+                        onClick={() => onOpenPhoto(p)}
+                        onMouseEnter={() => isDesktop && setHoveredPhotoId(p.id)}
+                        onMouseLeave={() => isDesktop && setHoveredPhotoId((cur) => (cur === p.id ? null : cur))}
+                        onFocus={() => isDesktop && setHoveredPhotoId(p.id)}
+                        onBlur={() => isDesktop && setHoveredPhotoId((cur) => (cur === p.id ? null : cur))}
+                        style={{
+                          position: 'relative',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: '100%',
+                          height: isDesktop ? 148 : 200,
+                          padding: 4,
+                          overflow: 'hidden',
+                          borderRadius: 10,
+                          background: 'rgba(15, 23, 42, 0.06)',
+                        }}
+                      >
+                        <img
+                          src={p.src}
+                          alt={p.caption || bench.name}
+                          style={{
+                            width: '100%',
+                            height: '100%',
+                            objectFit: 'contain',
+                            display: 'block',
+                            borderRadius: 6,
+                          }}
+                        />
+                        {isDesktop && p.caption && (
+                          <span
+                            className="thumb-cap"
+                            style={{
+                              position: 'absolute',
+                              insetInline: 0,
+                              bottom: 0,
+                              padding: '8px 10px',
+                              background: 'rgba(15, 23, 42, 0.82)',
+                              color: '#ffffff',
+                              fontSize: 12,
+                              lineHeight: 1.35,
+                              textAlign: 'left',
+                              opacity: isHovered ? 1 : 0,
+                              transition: 'opacity 140ms ease',
+                              pointerEvents: 'none',
+                            }}
+                          >
+                            {p.caption}
+                          </span>
+                        )}
+                        {p.status === 'hidden' && <span className="thumb-flag">Hidden</span>}
+                      </button>
+
+                      {!isDesktop && p.caption && (
+                        <span
+                          className="thumb-cap small"
+                          style={{
+                            padding: '2px 4px',
+                            lineHeight: 1.35,
+                            wordBreak: 'break-word',
+                          }}
+                        >
+                          {p.caption}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <p className="muted small">
@@ -219,14 +331,37 @@ export default function BenchDetail({
         </>
       )}
 
-      {isOwner && (
+      {(isOwner || canUpdateMainPhoto) && (
         <div className="owner-bar">
-          <button type="button" className="btn btn-secondary btn-sm" onClick={onEdit}>
-            Edit bench
-          </button>
+          {isOwner && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onEdit}>
+              Edit bench
+            </button>
+          )}
+          {canUpdateMainPhoto && onUpdateMainPhoto && (
+            <>
+              <input
+                ref={mainPhotoInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
+                hidden
+                onChange={(e) => {
+                  void handleMainPhotoFile(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={updatingMainPhoto}
+                onClick={() => mainPhotoInputRef.current?.click()}
+              >
+                {updatingMainPhoto ? 'Updating main photo…' : 'Update main photo'}
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
   );
 }
-

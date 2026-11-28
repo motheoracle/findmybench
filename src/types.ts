@@ -27,6 +27,8 @@ export type Material =
 
 export type MapLayerMode = 'default' | 'satellite' | 'terrain';
 export type Units = 'metric' | 'imperial';
+export type ThemeMode = 'light' | 'dark';
+export type UserRole = 'user' | 'photographer' | 'admin';
 
 export interface LngLat {
   lng: number;
@@ -37,6 +39,7 @@ export interface UserPreferences {
   creditAnonymously: boolean;
   defaultLayer: MapLayerMode;
   units: Units;
+  theme?: ThemeMode;
 }
 
 export interface User {
@@ -45,6 +48,7 @@ export interface User {
   email: string;
   age?: number;
   avatar?: string;
+  role?: UserRole;
   prefs: UserPreferences;
 }
 
@@ -69,6 +73,8 @@ export interface Bench {
   directions: string;
   notes?: string;
   photo?: string;
+  mainPhotoSetByPhotographer?: boolean;
+  mainPhotoUpdatedAt?: string;
   createdBy?: PublicAuthor;
   createdAt: string;
   updatedAt?: string;
@@ -86,7 +92,17 @@ export type ViewableBench = ViewBench;
 
 export type BenchEditable = Pick<
   Bench,
-  'name' | 'difficulty' | 'material' | 'materialNote' | 'directions' | 'notes' | 'photo' | 'lat' | 'lng'
+  | 'name'
+  | 'difficulty'
+  | 'material'
+  | 'materialNote'
+  | 'directions'
+  | 'notes'
+  | 'photo'
+  | 'mainPhotoSetByPhotographer'
+  | 'mainPhotoUpdatedAt'
+  | 'lat'
+  | 'lng'
 >;
 
 export interface NearbyMatch {

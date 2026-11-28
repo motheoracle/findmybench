@@ -15,14 +15,17 @@ const ModerationModal = lazy(() => import('./components/ModerationModal'));
 const DevPanel = lazy(() => import('./components/DevPanel'));
 import BottomSheet, { type SheetState } from './components/BottomSheet';
 import { useMediaQuery } from './hooks/useMediaQuery';
+import { useExplorerEntitlement } from './hooks/useExplorerEntitlement';
 import { benchService, DuplicateBenchError } from './lib/benchService';
 import { entitlements, DEV_TOOLS_ENABLED } from './services/entitlements';
 import { reviewRepo } from './services/reviewRepository';
 import { galleryRepo } from './services/galleryRepository';
 import { SAMPLE_BENCHES } from './data/sampleBenches';
 import { ACTIVE_COUNTRY, ACTIVE_REGION, isInsideRegion } from './config/regions';
+import { MAX_GALLERY_PHOTOS_PER_USER_PER_BENCH } from './config/community';
 import { isPaidTier, tierForDifficulty } from './config/taxonomy';
-import { isOwner, formatDistance, toViewBench } from './utils/geo';
+import { canUpdateMainPhoto, isOwner, formatDistance, toViewBench } from './utils/geo';
+import { fetchWalkingRoute, haversineMeters } from './utils/routing';
 import { readJSON, writeJSON } from './utils/storage';
 import type {
   Bench,
@@ -34,9 +37,14 @@ import type {
   Rating,
   ReportReason,
   Review,
+  ThemeMode,
   User,
   UserPreferences,
 } from './types';
+
+const EXPLORER_PAYMENT_LINK = 'https://buy.stripe.com/cNi5kFgHq11De5N3F51wY00';
+const REROUTE_DISTANCE_THRESHOLD_M = 8;
+const ARRIVAL_DISTANCE_THRESHOLD_M = 15;
 
 type PanelView =
   | { kind: 'browse' }
@@ -48,11 +56,27 @@ type PanelView =
 type ModalState =
   | null
   | { kind: 'auth'; reason: string; then?: () => void }
-  | { kind: 'checkout' }
+  | { kind: 'checkout'; checkoutUrl?: string | null }
   | { kind: 'settings' }
   | { kind: 'contribute'; benchId: string }
   | { kind: 'photo'; photoId: string }
   | { kind: 'moderation' };
+
+type RouteTarget = {
+  id: string;
+  name: string;
+  lng: number;
+  lat: number;
+};
+
+interface RouteMetrics {
+  distanceMeters: number;
+  durationSeconds: number;
+}
+
+type PermissionCapableOrientationEvent = typeof DeviceOrientationEvent & {
+  requestPermission?: () => Promise<'granted' | 'denied'>;
+};
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -80,21 +104,41 @@ function setBenchIdInUrl(id: string | null): void {
   window.history.replaceState({}, '', url.toString());
 }
 
+function formatWalkEta(durationSeconds: number): string {
+  const mins = Math.max(1, Math.round(durationSeconds / 60));
+  return mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `~${mins} min`;
+}
+
+function normalizeHeading(deg: number): number {
+  return ((deg % 360) + 360) % 360;
+}
+
 export default function App() {
   const isDesktop = useMediaQuery('(min-width: 768px)');
   const isMobile = !isDesktop;
 
   // ---- app state ----
   const [user, setUser] = useState<User | null>(null);
-  const [subscribed, setSubscribed] = useState(() => entitlements.isObscureUnlocked());
+  const {
+    isExplorer,
+    checkoutUrl: hookCheckoutUrl,
+    refresh: refreshEntitlement,
+  } = useExplorerEntitlement();
+  const [devUnlocked, setDevUnlocked] = useState(false);
+  const subscribed = Boolean(user && (isExplorer || (DEV_TOOLS_ENABLED && devUnlocked)));
+
   const [benches, setBenches] = useState<Bench[]>(() =>
     SAMPLE_BENCHES.filter((b) => b.country_code === ACTIVE_COUNTRY),
   );
   const [selectedReviews, setSelectedReviews] = useState<Review[]>([]);
   const [selectedPhotos, setSelectedPhotos] = useState<GalleryPhoto[]>([]);
+  const [flaggedPhotos, setFlaggedPhotos] = useState<GalleryPhoto[]>([]);
   const [dataRev, setDataRev] = useState(0);
   const [layerMode, setLayerMode] = useState<MapLayerMode>(
     () => readJSON<MapLayerMode>('layer', 'default'),
+  );
+  const [themeMode, setThemeMode] = useState<ThemeMode>(
+    () => readJSON<ThemeMode>('theme', 'light'),
   );
   const [styleNonce, setStyleNonce] = useState(0);
   const [mapStatus, setMapStatus] = useState<MapStatus>('loading');
@@ -104,11 +148,20 @@ export default function App() {
   const [draft, setDraft] = useState<DraftLocation | null>(null);
   const [locating, setLocating] = useState(false);
   const [flyTarget, setFlyTarget] = useState<FlyTarget | null>(null);
+  const [routeTarget, setRouteTarget] = useState<RouteTarget | null>(null);
+  const [routeOrigin, setRouteOrigin] = useState<LngLat | null>(null);
+  const [routeCoords, setRouteCoords] = useState<[number, number][] | null>(null);
+  const [routeMetrics, setRouteMetrics] = useState<RouteMetrics | null>(null);
+  const [userLocation, setUserLocation] = useState<LngLat | null>(null);
+  const [userHeadingDeg, setUserHeadingDeg] = useState<number | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
   const [sheet, setSheet] = useState<SheetState>('half');
   const [toast, setToast] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const toastTimer = useRef<number | undefined>(undefined);
+  const routeAbortRef = useRef<AbortController | null>(null);
+  const lastRoutedOriginRef = useRef<LngLat | null>(null);
+  const hasCompassHeadingRef = useRef(false);
   const appliedUrlBenchRef = useRef<string | null>(null);
   const hasInitializedUrlSync = useRef(false);
 
@@ -116,6 +169,28 @@ export default function App() {
     setToast(msg);
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), 3600);
+  }, []);
+
+  const clearRoute = useCallback(() => {
+    routeAbortRef.current?.abort();
+    routeAbortRef.current = null;
+    lastRoutedOriginRef.current = null;
+    setRouteTarget(null);
+    setRouteOrigin(null);
+    setRouteCoords(null);
+    setRouteMetrics(null);
+  }, []);
+
+  const requestCompassPermissionIfNeeded = useCallback(async () => {
+    if (typeof window === 'undefined' || typeof DeviceOrientationEvent === 'undefined') return;
+    const ctor = DeviceOrientationEvent as PermissionCapableOrientationEvent;
+    if (typeof ctor.requestPermission === 'function') {
+      try {
+        await ctor.requestPermission();
+      } catch {
+        // Permission denied or dismissed; movement heading fallback still works
+      }
+    }
   }, []);
 
   const refreshBenches = useCallback(async () => {
@@ -127,6 +202,23 @@ export default function App() {
     }
     setDataRev((r) => r + 1);
   }, [showToast]);
+
+  const refreshFlaggedQueue = useCallback(async () => {
+    if (!DEV_TOOLS_ENABLED) {
+      setFlaggedPhotos([]);
+      return;
+    }
+    try {
+      const remoteFlagged = await benchService.listFlaggedPhotos();
+      const localFlagged = galleryRepo.listForModeration();
+      const merged = new Map<string, GalleryPhoto>();
+      for (const p of localFlagged) merged.set(p.id, p);
+      for (const p of remoteFlagged) merged.set(p.id, p);
+      setFlaggedPhotos([...merged.values()]);
+    } catch {
+      setFlaggedPhotos(galleryRepo.listForModeration());
+    }
+  }, []);
 
   const selectedId = view.kind === 'detail' ? view.id : null;
 
@@ -160,29 +252,155 @@ export default function App() {
     void benchService.getCurrentUser().then((u) => {
       setUser(u);
       if (u?.prefs.defaultLayer) setLayerMode(u.prefs.defaultLayer);
+      if (u?.prefs.theme) setThemeMode(u.prefs.theme);
+      void refreshEntitlement();
     });
     const unsubscribe = benchService.onAuthStateChange((u) => {
       setUser(u);
+      if (!u) setDevUnlocked(false);
+      if (u?.prefs.theme) setThemeMode(u.prefs.theme);
+      void refreshEntitlement();
       void refreshBenches();
     });
     void refreshBenches();
+    void refreshFlaggedQueue();
     return unsubscribe;
-  }, [refreshBenches]);
+  }, [refreshBenches, refreshEntitlement, refreshFlaggedQueue]);
 
   useEffect(() => {
     void refreshDetailContent(selectedId, user?.id);
-  }, [selectedId, user?.id, dataRev, refreshDetailContent]);
+    void refreshFlaggedQueue();
+  }, [selectedId, user?.id, dataRev, refreshDetailContent, refreshFlaggedQueue]);
 
-  useEffect(() => entitlements.onChange(setSubscribed), []);
   useEffect(() => {
+    entitlements.setObscureUnlocked(false);
     entitlements.setActiveUser(user?.id ?? null);
   }, [user?.id]);
   useEffect(() => writeJSON('layer', layerMode), [layerMode]);
+  useEffect(() => {
+    writeJSON('theme', themeMode);
+    document.documentElement.setAttribute('data-theme', themeMode);
+    document.documentElement.classList.toggle('dark', themeMode === 'dark');
+  }, [themeMode]);
 
   const fly = useCallback((p: LngLat, zoom?: number) => {
     setFlyTarget({ ...p, zoom, key: Date.now() });
   }, []);
   const units = user?.prefs.units ?? 'metric';
+
+  // ---- real-time facing heading (compass + movement fallback) ----
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleOrientation = (ev: DeviceOrientationEvent) => {
+      const iosHeading = (ev as unknown as { webkitCompassHeading?: number }).webkitCompassHeading;
+      if (typeof iosHeading === 'number' && !Number.isNaN(iosHeading)) {
+        hasCompassHeadingRef.current = true;
+        setUserHeadingDeg(normalizeHeading(iosHeading));
+        return;
+      }
+
+      if (typeof ev.alpha === 'number' && !Number.isNaN(ev.alpha)) {
+        const screenAngle =
+          typeof window.screen?.orientation?.angle === 'number' ? window.screen.orientation.angle : 0;
+        const compassHeading = normalizeHeading(360 - ev.alpha + screenAngle);
+        hasCompassHeadingRef.current = true;
+        setUserHeadingDeg(compassHeading);
+      }
+    };
+
+    const winWithAbs = window as unknown as {
+      addEventListener(type: 'deviceorientationabsolute', listener: (ev: DeviceOrientationEvent) => void): void;
+      removeEventListener(type: 'deviceorientationabsolute', listener: (ev: DeviceOrientationEvent) => void): void;
+    };
+
+    window.addEventListener('deviceorientation', handleOrientation);
+    winWithAbs.addEventListener('deviceorientationabsolute', handleOrientation);
+
+    return () => {
+      window.removeEventListener('deviceorientation', handleOrientation);
+      winWithAbs.removeEventListener('deviceorientationabsolute', handleOrientation);
+    };
+  }, []);
+
+  // ---- live route tracking (watchPosition) ----
+  useEffect(() => {
+    if (!routeTarget) return;
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+      showToast(`Directions target set for ${routeTarget.name}.`);
+      return;
+    }
+
+    lastRoutedOriginRef.current = null;
+    let hasAnnouncedInitialRoute = false;
+
+    const recomputeRoute = (origin: LngLat, signal: AbortSignal) => {
+      lastRoutedOriginRef.current = origin;
+      void fetchWalkingRoute(origin, { lng: routeTarget.lng, lat: routeTarget.lat }, signal).then((res) => {
+        if (signal.aborted) return;
+        setRouteCoords(res.coords);
+        setRouteMetrics({
+          distanceMeters: res.distanceMeters,
+          durationSeconds: res.durationSeconds,
+        });
+        const distLabel = formatDistance(res.distanceMeters, units);
+        if (!hasAnnouncedInitialRoute) {
+          hasAnnouncedInitialRoute = true;
+          showToast(
+            res.mode === 'walking-path'
+              ? `Walking route (${distLabel}) ready to ${routeTarget.name}.`
+              : `Direct line (${distLabel}) shown to ${routeTarget.name}.`,
+          );
+        }
+      });
+    };
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const ctrl = routeAbortRef.current;
+        if (!ctrl || ctrl.signal.aborted) return;
+
+        const current: LngLat = { lng: pos.coords.longitude, lat: pos.coords.latitude };
+        setUserLocation(current);
+        setRouteOrigin(current);
+
+        if (
+          !hasCompassHeadingRef.current &&
+          typeof pos.coords.heading === 'number' &&
+          !Number.isNaN(pos.coords.heading) &&
+          (typeof pos.coords.speed !== 'number' || pos.coords.speed > 0.4)
+        ) {
+          setUserHeadingDeg(normalizeHeading(pos.coords.heading));
+        }
+
+        const distanceToBench = haversineMeters(current, {
+          lng: routeTarget.lng,
+          lat: routeTarget.lat,
+        });
+
+        if (distanceToBench <= ARRIVAL_DISTANCE_THRESHOLD_M) {
+          showToast(`You've arrived at ${routeTarget.name}!`);
+          clearRoute();
+          return;
+        }
+
+        const prevRouted = lastRoutedOriginRef.current;
+        const movedSinceRoute = prevRouted ? haversineMeters(prevRouted, current) : Infinity;
+
+        if (!prevRouted || movedSinceRoute >= REROUTE_DISTANCE_THRESHOLD_M) {
+          recomputeRoute(current, ctrl.signal);
+        }
+      },
+      () => {
+        // Keep existing route/target if GPS momentarily drops
+      },
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 },
+    );
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [routeTarget, units, clearRoute, showToast]);
 
   // ---- derived ----
   const viewBenches = useMemo(
@@ -243,10 +461,10 @@ export default function App() {
   const modQueue = useMemo(
     () =>
       DEV_TOOLS_ENABLED
-        ? { photos: galleryRepo.listForModeration(), reviews: reviewRepo.listForModeration() }
+        ? { photos: flaggedPhotos, reviews: reviewRepo.listForModeration() }
         : { photos: [], reviews: [] },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [dataRev],
+    [flaggedPhotos, dataRev],
   );
 
   // ---- navigation ----
@@ -280,6 +498,18 @@ export default function App() {
     fly({ lat: b.lat, lng: b.lng }, 17);
   };
 
+  const handlePhotographerMainPhoto = async (benchId: string, photoDataUrl: string) => {
+    if (!user) return showToast('Sign in to update the main photo.');
+    try {
+      await benchService.setMainPhotoAsPhotographer(benchId, user.id, photoDataUrl);
+      await refreshBenches();
+      await refreshDetailContent(benchId, user.id);
+      showToast('Main bench photo updated.');
+    } catch (err) {
+      showToast(errMsg(err));
+    }
+  };
+
   const openMine = () => {
     setMenuOpen(false);
     setPickMode(false);
@@ -293,12 +523,43 @@ export default function App() {
     setView(to);
   };
 
+  const goHome = useCallback(() => {
+    setMenuOpen(false);
+    setModal(null);
+    setPickMode(false);
+    setDraft(null);
+    clearRoute();
+    setFilter('all');
+    setView({ kind: 'browse' });
+    if (isMobile) setSheet('half');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [clearRoute, isMobile]);
+
+  const getCheckoutUrlForUser = useCallback(
+    (activeUser: User | null) => {
+      if (hookCheckoutUrl) return hookCheckoutUrl;
+      if (!activeUser?.id) return null;
+      return `${EXPLORER_PAYMENT_LINK}?client_reference_id=${encodeURIComponent(activeUser.id)}`;
+    },
+    [hookCheckoutUrl],
+  );
+
+  const openCheckoutFlow = useCallback(
+    (activeUser: User | null) => {
+      const url = getCheckoutUrlForUser(activeUser);
+      setModal({ kind: 'checkout', checkoutUrl: url });
+    },
+    [getCheckoutUrlForUser],
+  );
+
   const requestUnlock = () =>
     user
-      ? setModal({ kind: 'checkout' })
-      : requireAuth('Create a free account first — your subscription is linked to it across devices.', () =>
-          setModal({ kind: 'checkout' }),
-        );
+      ? openCheckoutFlow(user)
+      : requireAuth('Create a free account first — your subscription is linked to it across devices.', () => {
+          void benchService.getCurrentUser().then((signedInUser) => {
+            openCheckoutFlow(signedInUser);
+          });
+        });
 
   // ---- location ----
   const setDraftChecked = (p: DraftLocation) => {
@@ -331,6 +592,7 @@ export default function App() {
       (pos) => {
         setLocating(false);
         const p = { lng: pos.coords.longitude, lat: pos.coords.latitude, accuracyM: pos.coords.accuracy };
+        setUserLocation(p);
         if (setDraftChecked(p)) {
           setPickMode(false);
           fly(p, 18);
@@ -439,11 +701,17 @@ export default function App() {
           height: c.photo.height,
           bytes: c.photo.bytes,
           contentHash: c.photo.hash,
+          moderationStatus: c.moderationStatus,
         });
         setModal(null);
         await refreshDetailContent(benchId, uid);
+        await refreshFlaggedQueue();
         setDataRev((r) => r + 1);
-        showToast('Photo added to the gallery.');
+        if (c.moderationStatus === 'flagged') {
+          showToast(`Photo flagged for review. ${c.faceBlurNote}`);
+        } else {
+          showToast(`Photo is live! ${c.faceBlurNote}`);
+        }
       } catch (err) {
         showToast(errMsg(err));
       }
@@ -479,6 +747,7 @@ export default function App() {
       };
       setUser(updatedUser);
       if (prevDefault !== nextPrefs.defaultLayer) setLayerMode(nextPrefs.defaultLayer);
+      if (nextPrefs.theme) setThemeMode(nextPrefs.theme);
       await refreshBenches();
       if (selectedId) await refreshDetailContent(selectedId, updatedUser.id);
       setModal(null);
@@ -491,9 +760,11 @@ export default function App() {
 
   const signOut = () => {
     setMenuOpen(false);
+    setDevUnlocked(false);
     if (formActive || view.kind === 'mine') leaveForm();
     void benchService.signOut().then(() => {
       setUser(null);
+      void refreshEntitlement();
       showToast('Signed out.');
     });
   };
@@ -539,12 +810,15 @@ export default function App() {
   } else if (view.kind === 'detail' && selected) {
     const bench = selected.bench;
     const myPhotoCountOnBench = user ? selectedPhotos.filter((p) => p.author.id === user.id).length : 0;
-    const remainingPhotos = user ? Math.max(0, 3 - myPhotoCountOnBench) : 0;
+    const remainingPhotos = user
+      ? Math.max(0, MAX_GALLERY_PHOTOS_PER_USER_PER_BENCH - myPhotoCountOnBench)
+      : 0;
     panel = (
       <BenchDetail
         key={bench.id}
         view={selected}
         isOwner={isOwner(bench, user)}
+        canUpdateMainPhoto={canUpdateMainPhoto(bench, user)}
         viewerId={user?.id}
         signedIn={!!user}
         photos={selectedPhotos}
@@ -552,10 +826,34 @@ export default function App() {
         reviewCount={selectedReviews.filter((r) => r.status !== 'hidden').length}
         remainingPhotos={remainingPhotos}
         backLabel={view.from === 'mine' ? 'My Listings' : 'All benches'}
-        onBack={() => setView(view.from === 'mine' && user ? { kind: 'mine' } : { kind: 'browse' })}
+        onBack={() => {
+          clearRoute();
+          setView(view.from === 'mine' && user ? { kind: 'mine' } : { kind: 'browse' });
+        }}
         onUnlock={requestUnlock}
         onZoom={() => fly({ lng: selected.displayLng, lat: selected.displayLat }, selected.locked ? 11 : 17)}
+        onDirections={() => {
+          void requestCompassPermissionIfNeeded();
+          const target: RouteTarget = {
+            id: bench.id,
+            name: bench.name,
+            lng: selected.displayLng,
+            lat: selected.displayLat,
+          };
+          routeAbortRef.current?.abort();
+          const ctrl = new AbortController();
+          routeAbortRef.current = ctrl;
+          lastRoutedOriginRef.current = null;
+
+          setRouteTarget(target);
+          setRouteCoords(null);
+          setRouteMetrics(null);
+          fly({ lng: target.lng, lat: target.lat }, selected.locked ? 11 : 16);
+          if (isMobile) setSheet('peek');
+          showToast(`Tracking live walking route to ${target.name}...`);
+        }}
         onEdit={() => openEdit(bench.id)}
+        onUpdateMainPhoto={(photoDataUrl) => handlePhotographerMainPhoto(bench.id, photoDataUrl)}
         onAddPhoto={() => requestAddPhoto(bench.id)}
         onOpenPhoto={(p) => setModal({ kind: 'photo', photoId: p.id })}
         reviews={
@@ -665,14 +963,30 @@ export default function App() {
   );
 
   const brand = (
-    <div className="brand">
+    <button
+      type="button"
+      className="brand"
+      onClick={goHome}
+      aria-label="FindMyBench home"
+      style={{
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        font: 'inherit',
+        color: 'inherit',
+        cursor: 'pointer',
+        textAlign: 'left',
+      }}
+    >
       <img src="./favicon.svg" alt="" width={28} height={28} />
       <span>
         Find<b>My</b>Bench
       </span>
       <small className="region-pill">{ACTIVE_COUNTRY}</small>
-    </div>
+    </button>
   );
+
+  const centerOnBlip = userLocation ?? routeOrigin;
 
   return (
     <div className={`app ${isDesktop ? 'is-desktop' : 'is-mobile'} ${menuOpen ? 'menu-open' : ''}`}>
@@ -695,6 +1009,11 @@ export default function App() {
           pickMode={pickMode}
           draft={formActive ? draft : null}
           flyTarget={flyTarget}
+          routeTarget={routeTarget}
+          routeOrigin={routeOrigin}
+          routeCoords={routeCoords}
+          userLocation={userLocation}
+          userHeadingDeg={userHeadingDeg}
           isMobile={isMobile}
           onSelect={(id) => selectBench(id)}
           onPick={handlePick}
@@ -711,6 +1030,81 @@ export default function App() {
           )}
           <LayerSwitcher mode={layerMode} onChange={setLayerMode} />
         </div>
+
+        {routeTarget && (
+          <div className="pick-banner" role="status">
+            <span>🧭 {routeTarget.name}</span>
+            <button
+              className="btn btn-sm btn-ghost-light"
+              onClick={clearRoute}
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
+        {(routeTarget || centerOnBlip) && (
+          <div
+            style={{
+              position: 'absolute',
+              right: 12,
+              bottom: isMobile ? 92 : 34,
+              zIndex: 6,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+            }}
+          >
+            {routeTarget && routeMetrics && (
+              <div
+                role="status"
+                style={{
+                  background: 'rgba(20, 24, 21, 0.9)',
+                  color: '#f7f4ec',
+                  padding: '7px 11px',
+                  borderRadius: 999,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  boxShadow: '0 4px 14px rgba(0,0,0,0.22)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {formatDistance(routeMetrics.distanceMeters, units)} · {formatWalkEta(routeMetrics.durationSeconds)} walk
+              </div>
+            )}
+            {centerOnBlip && (
+              <button
+                type="button"
+                aria-label="Center on my location"
+                title="Center on my location"
+                onClick={() => {
+                  void requestCompassPermissionIfNeeded();
+                  fly(centerOnBlip, 17);
+                }}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: '50%',
+                  border: '1px solid rgba(255,255,255,0.16)',
+                  background: 'rgba(20, 24, 21, 0.92)',
+                  color: '#ffffff',
+                  display: 'grid',
+                  placeItems: 'center',
+                  cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(0,0,0,0.25)',
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4" />
+                  <line x1="12" y1="2" x2="12" y2="6" />
+                  <line x1="12" y1="18" x2="12" y2="22" />
+                  <line x1="2" y1="12" x2="6" y2="12" />
+                  <line x1="18" y1="12" x2="22" y2="12" />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
 
         {pickMode && (
           <div className="pick-banner" role="status">
@@ -737,22 +1131,27 @@ export default function App() {
         {DEV_TOOLS_ENABLED && (
           <Suspense fallback={null}>
             <DevPanel
-            subscribed={subscribed}
-            onToggleSubscribed={(v) => entitlements.setObscureUnlocked(v)}
-            user={user}
-            onQuickSignIn={() => {
-              showToast('Use Sign in in the top bar with your Supabase email and password.');
-            }}
-            onSignOut={signOut}
-            onResetBenches={() => {
-              void refreshBenches();
-              leaveForm();
-              showToast('Refreshed benches from Supabase.');
-            }}
-            mapStatus={mapStatus}
-            moderationCount={modQueue.photos.length + modQueue.reviews.length}
-            onOpenModeration={() => setModal({ kind: 'moderation' })}
-          />
+              subscribed={subscribed}
+              onToggleSubscribed={(v) => {
+                setDevUnlocked(v);
+              }}
+              user={user}
+              onQuickSignIn={() => {
+                showToast('Use Sign in in the top bar with your Supabase email and password.');
+              }}
+              onSignOut={signOut}
+              onResetBenches={() => {
+                void refreshBenches();
+                leaveForm();
+                showToast('Refreshed benches from Supabase.');
+              }}
+              mapStatus={mapStatus}
+              moderationCount={modQueue.photos.length + modQueue.reviews.length}
+              onOpenModeration={() => {
+                void refreshFlaggedQueue();
+                setModal({ kind: 'moderation' });
+              }}
+            />
           </Suspense>
         )}
       </main>
@@ -766,6 +1165,7 @@ export default function App() {
           onSignedIn={() => {
             const then = modal.then;
             setModal(null);
+            void refreshEntitlement();
             void refreshBenches().then(() => then?.());
           }}
         />
@@ -773,13 +1173,15 @@ export default function App() {
       {modal?.kind === 'checkout' && (
         <Suspense fallback={null}>
           <CheckoutModal
-          onClose={() => setModal(null)}
-          onActivate={() => {
-            entitlements.setObscureUnlocked(true);
-            setModal(null);
-            showToast('Obscure benches unlocked 🔓');
-          }}
-        />
+            checkoutUrl={modal.checkoutUrl ?? getCheckoutUrlForUser(user)}
+            onRefresh={() => {
+              void refreshEntitlement();
+            }}
+            onClose={() => {
+              setModal(null);
+              void refreshEntitlement();
+            }}
+          />
         </Suspense>
       )}
       {modal?.kind === 'settings' && user && (
@@ -788,7 +1190,10 @@ export default function App() {
       {modal?.kind === 'contribute' && contributeBench && user && (
         <ContributePhotoModal
           bench={contributeBench}
-          remaining={Math.max(0, 3 - selectedPhotos.filter((p) => p.author.id === user.id).length)}
+          remaining={Math.max(
+            0,
+            MAX_GALLERY_PHOTOS_PER_USER_PER_BENCH - selectedPhotos.filter((p) => p.author.id === user.id).length,
+          )}
           onClose={() => setModal(null)}
           onSubmit={(c) => handleContribution(contributeBench.id, c)}
         />
@@ -807,14 +1212,17 @@ export default function App() {
               .deletePhoto(target.id, user.id, target.src)
               .then(async () => {
                 if (activeBenchId) await refreshDetailContent(activeBenchId, user.id);
+                await refreshFlaggedQueue();
                 setDataRev((r) => r + 1);
                 showToast('Photo deleted.');
               })
               .catch((err) => showToast(errMsg(err)));
           }}
           onReport={(reason) => {
-            void benchService.reportPhoto(lightboxPhoto.id, user!.id, reason).then(() => {
-              if (selectedId) void refreshDetailContent(selectedId, user?.id);
+            void benchService.reportPhoto(lightboxPhoto.id, user!.id, reason).then(async () => {
+              if (selectedId) await refreshDetailContent(selectedId, user?.id);
+              await refreshFlaggedQueue();
+              setDataRev((r) => r + 1);
               showToast('Thanks — photo reported.');
             });
             return null;
@@ -824,14 +1232,29 @@ export default function App() {
       {modal?.kind === 'moderation' && (
         <Suspense fallback={null}>
           <ModerationModal
-          photos={modQueue.photos}
-          reviews={modQueue.reviews}
-          benchName={(id) => benches.find((b) => b.id === id)?.name ?? id}
-          onClose={() => setModal(null)}
-          onPhoto={(id, s) => {
-            galleryRepo.moderate(id, s);
-            setDataRev((r) => r + 1);
-          }}
+            photos={modQueue.photos}
+            reviews={modQueue.reviews}
+            benchName={(id) => benches.find((b) => b.id === id)?.name ?? id}
+            onClose={() => setModal(null)}
+            onPhoto={(id, s) => {
+              const target = modQueue.photos.find((p) => p.id === id);
+              galleryRepo.moderate(id, s);
+              void benchService
+                .moderatePhoto(id, s, target?.src)
+                .then(async () => {
+                  if (selectedId) await refreshDetailContent(selectedId, user?.id);
+                  await refreshFlaggedQueue();
+                  setDataRev((r) => r + 1);
+                  showToast(
+                    s === 'delete'
+                      ? 'Photo deleted.'
+                      : s === 'visible'
+                        ? 'Photo approved and visible.'
+                        : 'Photo hidden.',
+                  );
+                })
+                .catch((err) => showToast(errMsg(err)));
+            }}
             onReview={(id, s) => {
               reviewRepo.moderate(id, s);
               setDataRev((r) => r + 1);

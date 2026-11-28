@@ -37,6 +37,13 @@ export const TAXONOMY: TaxonomyItem[] = [
     desc: 'Tucked away in lost inclosures, behind ruins or secret clearings.',
     isPaid: true,
   },
+  {
+    value: 'historic',
+    label: 'Historic / Heritage',
+    shortLabel: 'Historic',
+    desc: 'Historic landmarks, heritage sites & notable old benches.',
+    isPaid: true,
+  },
 ];
 
 export interface DifficultyOption {
@@ -50,6 +57,7 @@ export const DIFFICULTIES: DifficultyOption[] = [
   { value: 'moderate', label: 'Scenic / Viewpoint', hint: 'Coastal walls, hilltops & open vistas.' },
   { value: 'tricky', label: 'Tricky / Off-Trail', hint: 'Unpaved tracks & steep woodland paths.' },
   { value: 'hidden', label: 'Obscure & Hidden', hint: 'Secret clearings & overgrown spots.' },
+  { value: 'historic', label: 'Historic / Heritage', hint: 'Heritage sites & notable old benches.' },
 ];
 
 export interface MaterialOption {
@@ -70,7 +78,7 @@ export function tierForDifficulty(d: Difficulty): Tier {
 }
 
 export function isPaidTier(d: Difficulty): boolean {
-  return d === 'tricky' || d === 'hidden';
+  return d === 'tricky' || d === 'hidden' || d === 'historic';
 }
 
 export function difficultyLabel(d: Difficulty): string {
@@ -83,6 +91,8 @@ export function difficultyLabel(d: Difficulty): string {
       return 'Tricky / Off-Trail';
     case 'hidden':
       return 'Obscure & Hidden';
+    case 'historic':
+      return 'Historic / Heritage';
     default:
       return 'Standard / Urban';
   }

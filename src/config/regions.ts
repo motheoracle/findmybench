@@ -14,10 +14,10 @@ export interface RegionConfig {
 }
 
 /**
- * Region registry. v1 = GB only. To add a country in v2:
- *  1. widen `CountryCode` in src/types.ts
- *  2. add an entry here
- *  3. seed/query benches by `country_code`
+- Region registry. v1 = GB only. To add a country in v2:
+-  1. widen `CountryCode` in src/types.ts
+-  2. add an entry here
+-  3. seed/query benches by `country_code`
  */
 export const REGIONS: Record<CountryCode, RegionConfig> = {
   GB: {
@@ -31,7 +31,7 @@ export const REGIONS: Record<CountryCode, RegionConfig> = {
       [4.5, 61.5],
     ],
     currency: 'GBP',
-    subscriptionPrice: '£2.99/mo',
+    subscriptionPrice: '£4.99/mo',
   },
 };
 
